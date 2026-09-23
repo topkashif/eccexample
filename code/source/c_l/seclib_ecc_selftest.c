@@ -19,7 +19,7 @@
  * counter encoding and the byte order in one known answer. */
 static const uint8 seclib_st_sha256_msg[3u] =
 {
-    0x61u, 0x61u, 0x62u
+    0x61u, 0x62u, 0x63u
 };
 
 static const uint8 seclib_st_sha256_expect[32u] =

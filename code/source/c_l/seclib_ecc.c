@@ -21,7 +21,26 @@
 #include "mbedtls/bignum.h"
 #include "mbedtls/sha256.h"
 
+#include <stdlib.h>
 #include <string.h>
+
+/* Runtime allocator binding (see seclib_ecc_bind_allocator): the dispatch
+ * function mbedtls_platform_set_calloc_free() exists only when the platform
+ * layer is compiled with the runtime allocation configuration and no
+ * compile-time macros override it. Nested #if directives avoid
+ * line-continuations. */
+#if defined(MBEDTLS_PLATFORM_MEMORY)
+#if !defined(MBEDTLS_PLATFORM_CALLOC_MACRO)
+#if !defined(MBEDTLS_PLATFORM_FREE_MACRO)
+#include "mbedtls/platform.h"
+#define SECLIB_ECC_BIND_ALLOCATOR
+#if defined(MBEDTLS_MEMORY_BUFFER_ALLOC_C)
+#include "mbedtls/memory_buffer_alloc.h"
+#define SECLIB_ECC_USE_STATIC_POOL
+#endif
+#endif
+#endif
+#endif
 
 /******************************************************************************/
 /*                                LOCAL DATA                                   */
@@ -32,14 +51,78 @@ static mbedtls_ecp_group seclib_ecc_grp;
 
 static boolean seclib_ecc_initialized = FALSE;
 
+/* Dedicated heap for the ECC mbedtls layer (see seclib_ecc_bind_allocator).
+ * Sizing: P-224 with MBEDTLS_ECP_WINDOW_SIZE = 3 and
+ * MBEDTLS_ECP_FIXED_POINT_OPTIM = 0 peaks below 1 KiB (window table
+ * ~336 B plus mpi temporaries); 2 KiB covers it with margin. A static pool
+ * keeps ECC independent of the C-library heap and of the SecuritySAM token
+ * buffer (SecuritySMCore memory_buf), which share the global allocator
+ * dispatch in platform.c. */
+#ifdef SECLIB_ECC_USE_STATIC_POOL
+#define SECLIB_ECC_HEAP_SIZE (2048u)
+static uint8 seclib_ecc_heap[SECLIB_ECC_HEAP_SIZE];
+#endif
+
 /******************************************************************************/
 /*                             LOCAL FUNCTIONS                                 */
 /******************************************************************************/
 
+/* Bind the mbedtls heap allocator dispatch (platform.c function pointers) to
+ * this module's own static pool. bignum and ECP perform every heap allocation
+ * through the global dispatch when the runtime allocation configuration
+ * (MBEDTLS_PLATFORM_C + MBEDTLS_PLATFORM_MEMORY) is compiled in; the project
+ * rebinds that global pointer at runtime (SecuritySAM token buffer via
+ * SecuritySMCore, C-library heap otherwise), so ECC binds its own pool at
+ * every public entry point. Its allocations then stay deterministic and
+ * bounded: an exhausted pool yields NULL from mbedtls_calloc and a clean
+ * MBEDTLS_ERR_MPI_ALLOC_FAILED, never a fault.
+ * Concurrency: ECC and the SAM install flow must not interleave (they would
+ * rebind the shared dispatch under each other); this matches the existing
+ * ICUS single-service rule that already forbids concurrent crypto contexts. */
+#ifdef SECLIB_ECC_USE_STATIC_POOL
+static void seclib_ecc_bind_allocator(void)
+{
+    mbedtls_memory_buffer_alloc_init( seclib_ecc_heap, SECLIB_ECC_HEAP_SIZE );
+}
+#else
+static void seclib_ecc_bind_allocator(void)
+{
+#ifdef SECLIB_ECC_BIND_ALLOCATOR
+    /* Runtime dispatch without the pool allocator: bind the C library. */
+    (void)mbedtls_platform_set_calloc_free( calloc, free );
+#else
+    /* Compile-time allocator binding (MBEDTLS_PLATFORM_*_MACRO, or no
+     * MBEDTLS_PLATFORM_MEMORY): mbedtls_calloc is a direct macro and the
+     * dispatch pointers in platform.c do not exist. Nothing to bind. */
+#endif
+}
+#endif
+
 /* RNG bridge: mbedtls f_rng signature -> SecLib_RandomGenerate (ICUS PRNG
- * through the generated Csm random service). */
+ * through the generated Csm random service). The ICUS RNG primitive produces
+ * at most RNG_BYTE_SIZE (16) bytes per call and SecLib_RandomGenerate
+ * enforces exactly that length, so requests are served in 16-byte chunks. */
+#if defined(SECLIB_ECC_BENCH_NO_ICUS)
+/* ----------------------------------------------------------------------------
+ * BENCH-ONLY deterministic RNG (32-bit xorshift).
+ *
+ * Purpose: run SecLib_EccSelfTest on an ECU/bench build where ICUS is not
+ * yet enabled. All KAT results are independent of the RNG values (the RNG is
+ * used only for coordinate blinding, which does not change the mathematical
+ * result, and for the keygen consistency test, which validates structure,
+ * not entropy).
+ *
+ * SECURITY: output is fully predictable. NEVER define SECLIB_ECC_BENCH_NO_ICUS
+ * in a production or security-relevant build; production must use the ICUS
+ * PRNG branch below. Keep this macro undefined (default).
+ * -------------------------------------------------------------------------- */
+static uint32 seclib_ecc_bench_rng_state = 0x1A2B3C4Du;
+
 static int seclib_ecc_rng_cb(void *p_rng, unsigned char *out, size_t out_len)
 {
+    size_t i;
+    uint32 x = seclib_ecc_bench_rng_state;
+
     (void)p_rng;
 
     if (out == NULL)
@@ -47,13 +130,56 @@ static int seclib_ecc_rng_cb(void *p_rng, unsigned char *out, size_t out_len)
         return MBEDTLS_ERR_ECP_BAD_INPUT_DATA;
     }
 
-    if (SecLib_RandomGenerate(out, (uint32)out_len) != OPERATION_SUCCESSFUL)
+    for (i = 0u; i < out_len; i++)
     {
-        return MBEDTLS_ERR_ECP_RANDOM_FAILED;
+        /* xorshift32: period 2^32-1, deterministic, bench-only */
+        x ^= (uint32)(x << 13u);
+        x ^= (uint32)(x >> 17u);
+        x ^= (uint32)(x << 5u);
+        seclib_ecc_bench_rng_state = x;
+        out[i] = (uint8)(x & 0xFFu);
     }
 
     return 0;
 }
+#else
+static int seclib_ecc_rng_cb(void *p_rng, unsigned char *out, size_t out_len)
+{
+    uint8 chunk[RNG_BYTE_SIZE];
+    size_t filled = 0u;
+    size_t take;
+
+    (void)p_rng;
+
+    if (out == NULL)
+    {
+        return MBEDTLS_ERR_ECP_BAD_INPUT_DATA;
+    }
+
+    while (filled < out_len)
+    {
+        if (SecLib_RandomGenerate(chunk, RNG_BYTE_SIZE) != OPERATION_SUCCESSFUL)
+        {
+            memset(chunk, 0, sizeof(chunk));
+            return MBEDTLS_ERR_ECP_RANDOM_FAILED;
+        }
+
+        take = out_len - filled;
+        if (take > RNG_BYTE_SIZE)
+        {
+            take = RNG_BYTE_SIZE;
+        }
+        memcpy(&out[filled], chunk, take);
+        filled += take;
+
+        /* The tail of the last chunk beyond out_len is unused entropy:
+         * do not leave it on the stack. */
+        memset(chunk, 0, sizeof(chunk));
+    }
+
+    return 0;
+}
+#endif /* SECLIB_ECC_BENCH_NO_ICUS */
 
 /* Import a 56-byte X||Y wire point into an mbedtls point (no on-curve check). */
 static int seclib_ecc_point_read(const uint8 *buf, mbedtls_ecp_point *P)
@@ -92,6 +218,8 @@ Enable_Secure_Boot_Status_Type SecLib_EccInit(void)
         return OPERATION_SUCCESSFUL;
     }
 
+    seclib_ecc_bind_allocator();
+
     mbedtls_ecp_group_init( &seclib_ecc_grp );
 
     ret = mbedtls_ecp_group_load( &seclib_ecc_grp, MBEDTLS_ECP_DP_SECP224R1 );
@@ -126,6 +254,8 @@ Enable_Secure_Boot_Status_Type SecLib_EccGenerateEphemeralKey(
     {
         return OPERATION_GENERAL_ERROR;
     }
+
+    seclib_ecc_bind_allocator();
 
     mbedtls_mpi_init( &d );
     mbedtls_ecp_point_init( &Q );
@@ -166,6 +296,8 @@ Enable_Secure_Boot_Status_Type SecLib_EccScalarMultBase(
         return OPERATION_GENERAL_ERROR;
     }
 
+    seclib_ecc_bind_allocator();
+
     mbedtls_mpi_init( &k );
     mbedtls_ecp_point_init( &Q );
 
@@ -201,6 +333,8 @@ Enable_Secure_Boot_Status_Type SecLib_EccScalarMultPoint(
     {
         return OPERATION_GENERAL_ERROR;
     }
+
+    seclib_ecc_bind_allocator();
 
     mbedtls_mpi_init( &k );
     mbedtls_ecp_point_init( &P );
@@ -243,6 +377,8 @@ Enable_Secure_Boot_Status_Type SecLib_EccComputeSharedSecret(
     {
         return OPERATION_GENERAL_ERROR;
     }
+
+    seclib_ecc_bind_allocator();
 
     mbedtls_mpi_init( &d );
     mbedtls_ecp_point_init( &Qp );
