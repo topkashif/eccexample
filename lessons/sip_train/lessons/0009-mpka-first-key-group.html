@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>09 · MPKA: configure one key group</title><link rel="stylesheet" href="../assets/course.css"><script defer src="../assets/retrieval-check.js"></script></head>
+<body><main><div class="kicker">Lesson 09 · Key lifecycle · Vector vKeyM_MPKA 4.02.00</div>
+<h1>One negotiation group.<br>Four distinct keys.</h1>
+<p class="lede">Your first win: trace the keys MPKA needs without confusing a shared secret, an AES key, and a truncated MAC. This extends the SecOC configuration course into key establishment.</p>
+<div class="callout caution"><strong>Feasibility gate.</strong> The supplied Crypto_30_CryWrapper hardware functions for key exchange and derivation return E_NOT_OK. The supplied ICUS path alone cannot run this MPKA negotiation. Obtain a compatible ECC/ECBD + X9.63-SHA256 crypto backend before expecting a target test to succeed. This lesson configures the contract, not a proven hardware implementation. <a href="../reference/mpka-davinci-configuration.html#feasibility">Evidence and target boundary</a>.</div>
+<h2>1 · Predict before configuring</h2><p>Your group contains this ECU and two remote ECUs, all present in Proxi. Which protocol will MPKA select?</p>
+<div class="card" data-retrieval data-answer="ECBD" data-correct="Correct. Three present members select ECBD; two select ECDH. The local member is implicit in the group." data-retry="Try again: count the local ECU as well as both remote ECUs. ECDH is the two-member case."><label for="protocol">Enter ECDH or ECBD</label> <input id="protocol" autocomplete="off" maxlength="4"><button type="button">Check</button><p role="status" aria-live="polite"></p></div>
+<h2>2 · Build the reference graph</h2><pre>CddKeyNegotiationGroup: KNG_SecOC
+  CddKeyNegotiationGroupKeyRef → KEX_Group
+  CddMessageGroup: MG_HVBATT
+    CddMsgGrpKDFInputKey → KDF_Input
+    CddMsgGrpTmpKey      → MAC_Temporary
+    CddMsgGrpKey         → MAC_Final
+
+Each name above denotes a CsmKey:
+CsmKeyRef → CryIfKey → CryIfKeyRef → driver CryptoKey
+
+shared secret → KDF → temporary AES key
+                           ↓ group confirmation
+                      final AES key → SecOC CSM MAC job</pre>
+<p>The group key must support Vector's ECBD key workflow even if only two ECUs are currently present. The driver template named <code>KeyExchange_NISTP224R1_BD</code> is the technical reference's starting point for either supported curve; sizes must match the chosen curve. <a href="../components/vKeyM_MPKA/Documentation/TechnicalReference_vKeyM_MPKA.pdf#page=25">Read §5.4</a>.</p>
+<h2>3 · Enter one group</h2><ol><li>In the Basic Editor, open <code>vKeyM_MPKA → Cdd</code>. Set the OEM local ECU ID and curve in <code>CddGeneral</code>.</li><li>Create remote-member entries and bind each to its own MPKA RX contribution.</li><li>Create <code>CddKeyNegotiationGroup</code>: OEM group ID, SecOC negotiation type, required X or X-and-Y shared-value mode, local TX contribution, remote-member references, and <code>KEX_Group</code>.</li><li>Create <code>CddMessageGroup</code>: OEM message-group ID and the three remaining CSM-key references shown above. Leave <code>CddMsgGrpTmpKeyMacSec</code> absent for this SecOC case.</li></ol>
+<p>Instance names here are teaching names, not existing project handles. Curve and shared-value mode must match the OEM requirement and all peers. <a href="../reference/mpka-davinci-configuration.html#group">Exact fields, defaults, and constraints</a>.</p>
+<h2>4 · Check the units</h2><p>For AES-128 CMAC, the final key is <strong>16 bytes</strong>. The Profile 2 authenticator on CAN is <strong>3 bytes</strong>. Do not make the MPKA key three bytes long. <a href="../components/vKeyM_MPKA/Documentation/TechnicalReference_vKeyM_MPKA.pdf#page=30">Read §5.7.1</a>.</p>
+<div class="card" data-retrieval data-answer="16" data-correct="Correct: 16-byte AES key. The 24-bit truncation belongs to the transmitted MAC, not to key storage." data-retry="Recall AES-128: the key length is 128 bits, while only the MAC is truncated. Enter the key size in bytes."><label for="keybytes">Final AES key size in bytes</label> <input id="keybytes" inputmode="numeric" autocomplete="off"><button type="button">Check</button><p role="status" aria-live="polite"></p></div>
+<h2>5 · Keep negotiation traffic separate</h2><p>MPKA uses <strong>64-byte</strong> messages for secp224r1 and <strong>72-byte</strong> messages for secp256r1, including its own 8-byte header. Neither fits one Classical CAN frame. Do not route the earlier HV_BATT PDU into MPKA or switch a generic selector to TP without an implemented adapter. <a href="../components/vKeyM_MPKA/Documentation/TechnicalReference_vKeyM_MPKA.pdf#page=32">Read §5.10–5.11</a>.</p>
+<h2>Next practice</h2><p>Without looking above, name the four keys and explain when the final key changes. Then open the <a href="../reference/mpka-davinci-configuration.html">full DaVinci configuration handbook</a> for communication, diagnostics, scheduling, ICUS limitations, and validation.</p>
+<p>Primary reading: <a href="../components/vKeyM_MPKA/Documentation/TechnicalReference_vKeyM_MPKA.pdf#page=24">local MPKA Technical Reference, chapter 5</a>. Previous lesson: <a href="0008-build-the-missing-seoc-integration-boundary.html">generated integration boundaries</a>.</p><div class="callout">Ask me follow-up questions. To turn this into your exact ECU configuration, send the OEM curve/revision, member IDs, negotiation transport, and crypto backend. No secret keys are needed.</div>
+</main></body></html>

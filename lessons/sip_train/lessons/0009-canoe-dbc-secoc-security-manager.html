@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lesson 9 — CANoe DBC and SecOC Security Manager</title><link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<div class="kicker">Lesson 09 · CANoe integration</div>
+<h1>Put the SecOC frame in CANoe without confusing DBC with security configuration</h1>
+<p class="lede">Today’s win: make CANoe display the correct 8-byte bus frame, then give Security Manager the separate SecOC meaning needed to generate and validate the 24-bit CMAC.</p>
+<div class="callout caution"><strong>Version note:</strong> CANoe 12 menu names and licensed Security Manager features must be confirmed in the installed Help. The workflow below is the stable object model; exact labels may vary by CANoe 12 service pack and Security Manager/OEM add-on.</div>
+
+<h2>1. What the DBC must describe</h2>
+<p>Your DBC message must be the physical secured CAN frame, not only the five-byte Authentic PDU:</p>
+<pre>CAN ID: project HV_BATT ID
+DLC = 8, Classical CAN
+
+byte 0     HV_BATTERY_SOCE_DISP
+byte 1–2   HVBatt_NetEnrgy_Consumd_OBM_Trip
+byte 3–4   reserved/zero padding
+byte 5–7   MAC_HV_BATT, 24 bits</pre>
+<table><thead><tr><th>DBC element</th><th>Purpose</th></tr></thead><tbody>
+<tr><td>Message, CAN ID, DLC</td><td>Defines the physical frame CANoe sends/receives.</td></tr>
+<tr><td>Payload signals</td><td>Decodes application data for display and stimulation.</td></tr>
+<tr><td>Reserved bytes 3–4</td><td>Keep visible/controlled as zero; they remain authenticated data.</td></tr>
+<tr><td><code>MAC_HV_BATT</code></td><td>Displays the received three-byte authenticator; it does not by itself activate SecOC.</td></tr>
+</tbody></table>
+<div class="callout"><strong>Prediction:</strong> If the DBC message has DLC 5, can CANoe reproduce the ECU’s physical secured PDU? No. The configured message must carry all 8 bytes.</div>
+
+<h2>2. Add and validate the ordinary CAN database first</h2>
+<ol><li>Add the DBC to the CANoe network configuration.</li><li>Map the network to the correct CAN channel/interface.</li><li>Confirm <code>HV_BATT</code> appears with DLC 8.</li><li>Observe bytes 0–7 in Trace/Details.</li><li>Confirm the two reserved bytes are not accidentally omitted, shifted, or treated as MAC bytes.</li></ol>
+<p>Do this before enabling Security Manager. Otherwise a DBC placement problem and a CMAC problem become indistinguishable.</p>
+
+<h2>3. Configure the SecOC security object</h2>
+<p>Open the CANoe Security Configuration/Security Manager workflow provided by your CANoe 12 installation. Add a SecOC protected-PDU/security object and associate it with the CANoe database message and simulation controller/port that will send the valid frame.</p>
+<p>Enter the active project contract:</p>
+<pre>SecOC profile:             Profile 2 / 24Bit-CMAC-No-FV
+Algorithm:                AES-128 CMAC
+Data ID:                  0x0202
+Secured frame length:     8 bytes
+Authentic area:           offset 0, length 5
+Authenticator:            bytes 5–7, 24 bits
+Full/transmitted FV:      0 bits
+Padding bytes:            bytes 3–4 = 00 00</pre>
+<p>If CANoe instead asks for separate secured/authentic PDU mappings, map:</p>
+<pre>secured PDU   = HV_BATT CAN frame, 8 bytes
+authentic PDU = bytes 0..4, 5 bytes
+authenticator = bytes 5..7, 3 bytes</pre>
+
+<h2>4. Configure the test key</h2>
+<p>Use Security Manager’s key/profile management to add a test-only AES-128 key and associate it with Data ID <code>0x0202</code> or the SecOC PDU object, according to the CANoe 12 UI. Never put a production key in the DBC, CAPL, repository, or chat.</p>
+<p>For documentation use:</p>
+<pre>test AES-128 key = [REDACTED]
+Data ID          = 0x0202</pre>
+
+<h2>5. Expected valid frame</h2>
+<p>For payload bytes <code>CAN[0..2]</code>, CANoe should generate:</p>
+<pre>CMAC input = 02 02 || CAN[0] || CAN[1] || CAN[2] || 00 || 00
+CAN[5..7]  = first 3 CMAC bytes, under the configured MSB truncation rule</pre>
+<p>Use Trace to verify both the bytes on the bus and the values decoded by the DBC. The ECU should then follow:</p>
+<pre>CanIf → PduR Path A → SecOC → CSM/Crypto
+      → verified Authentic PDU → PduR Path B → COM/application</pre>
+
+<h2>6. Minimal test sequence</h2>
+<table><thead><tr><th>Test</th><th>CANoe action</th><th>Expected ECU result</th></tr></thead><tbody>
+<tr><td>Valid</td><td>Send Security Manager-generated frame.</td><td>Verification succeeds; five-byte Authentic PDU reaches upper layer.</td></tr>
+<tr><td>Payload corruption</td><td>Change byte 0, 1, or 2 without recalculating MAC.</td><td>Verification fails; no normal COM indication.</td></tr>
+<tr><td>Padding corruption</td><td>Change byte 3 or 4 from <code>00</code> without recalculating MAC.</td><td>Verification fails because padding is authenticated.</td></tr>
+<tr><td>MAC corruption</td><td>Flip a bit in byte 5, 6, or 7.</td><td>Verification fails.</td></tr>
+<tr><td>Replay</td><td>Replay a previously valid frame.</td><td>May be accepted: no-freshness Profile 2 does not provide replay protection.</td></tr>
+<tr><td>Wrong key/Data ID</td><td>Use a wrong test key or Data ID.</td><td>Verification fails.</td></tr>
+</tbody></table>
+
+<h2>7. Diagnose by evidence</h2>
+<ul><li><strong>DLC/MAC position wrong in Trace:</strong> DBC or secured-PDU mapping problem.</li><li><strong>MAC never changes with payload:</strong> Security Manager mapping/key/profile is inactive.</li><li><strong>CANoe frame looks valid but ECU rejects it:</strong> compare Data ID bytes, key, Authentic-PDU bytes, padding, truncation, and byte order.</li><li><strong>ECU never reaches SecOC:</strong> inspect PduR Path A; it must terminate at the SecOC secured PDU, not COM.</li><li><strong>SecOC verifies but application sees nothing:</strong> inspect PduR Path B and the five-byte Authentic-PDU destination.</li><li><strong>Bad MAC reaches application:</strong> check development mode, forced-pass/ignore-verification settings, and whether Path A bypasses SecOC.</li></ul>
+
+<h2>Primary sources</h2>
+<p><a href="https://www.vector.com/en/industries/automotive/application-areas/cybersecurity/security-manager/">Vector Security Manager</a>, <a href="https://www.vector.com/en/product/canoe/">Vector CANoe</a>, and the <a href="https://www.autosar.org/fileadmin/standards/R23-11/CP/AUTOSAR_CP_SWS_SecureOnboardCommunication.pdf">AUTOSAR CP R23-11 SecOC SWS</a>. See the <a href="../research/canoe12-secoc-security-manager.md">CANoe/Security Manager research note</a> and the <a href="../reference/secoc-generated-boundary-checklist.html">SecOC generated-boundary checklist</a>.</p>
+<div class="callout"><strong>Retrieval prompt:</strong> In one sentence, explain why the DBC must contain 8 bytes while Security Manager authenticates only bytes 0–4, and state where the three MAC bytes are located.</div>
+</main></body></html>

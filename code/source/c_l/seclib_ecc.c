@@ -52,12 +52,12 @@ static mbedtls_ecp_group seclib_ecc_grp;
 static boolean seclib_ecc_initialized = FALSE;
 
 /* Dedicated heap for the ECC mbedtls layer (see seclib_ecc_bind_allocator).
- * Sizing: P-224 with MBEDTLS_ECP_WINDOW_SIZE = 3 and
- * MBEDTLS_ECP_FIXED_POINT_OPTIM = 0 peaks below 1 KiB (window table
- * ~336 B plus mpi temporaries); 2 KiB covers it with margin. A static pool
- * keeps ECC independent of the C-library heap and of the SecuritySAM token
- * buffer (SecuritySMCore memory_buf), which share the global allocator
- * dispatch in platform.c. */
+ * 2 KiB is an initial arena size, not a target-measured peak guarantee.
+ * Comb multiplication allocates a point table, its MPI coordinates, allocator
+ * headers, and arithmetic temporaries; measure high-water usage under the
+ * actual GHS ABI before release. The static pool keeps ECC independent of the
+ * C-library heap and SecuritySAM token buffer, which share the global
+ * allocator dispatch in platform.c. */
 #ifdef SECLIB_ECC_USE_STATIC_POOL
 #define SECLIB_ECC_HEAP_SIZE (2048u)
 static uint8 seclib_ecc_heap[SECLIB_ECC_HEAP_SIZE];

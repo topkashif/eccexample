@@ -2334,7 +2334,7 @@ int mbedtls_mpi_fill_random( mbedtls_mpi *X, size_t size,
     MBEDTLS_MPI_CHK( mbedtls_mpi_lset( X, 0 ) );
 
     Xp = (unsigned char*) X->p;
-    f_rng( p_rng, Xp + overhead, size );
+    MBEDTLS_MPI_CHK( f_rng( p_rng, Xp + overhead, size ) );
 
     mpi_bigendian_to_host( X->p, limbs );
 
@@ -2373,7 +2373,7 @@ static int mpi_random_fill_same_limbs( mbedtls_mpi *X, size_t n_bytes,
     MBEDTLS_MPI_CHK( mbedtls_mpi_lset( X, 0 ) );
 
     Xp = (unsigned char*) X->p;
-    f_rng( p_rng, Xp + overhead, n_bytes );
+    MBEDTLS_MPI_CHK( f_rng( p_rng, Xp + overhead, n_bytes ) );
 
     mpi_bigendian_to_host( X->p, limbs );
 

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lesson 6 — Configure HV_BATT SecOC RX</title><link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<div class="kicker">Lesson 06 · one verified configuration win</div><h1>Configure the two-hop SecOC receive path</h1>
+<p class="lede">Today’s win: distinguish the 8-byte secured PDU from the 5-byte Authentic PDU, then configure PduR so authentication cannot be bypassed.</p>
+<div class="callout"><strong>Predict first:</strong> Should COM receive 8 bytes or 5 bytes? <em>Answer: 5 bytes, only after verification.</em></div>
+<h2>Step 1 — freeze the contract</h2><pre>Secured CAN PDU:  8 bytes
+Authentic PDU:    5 bytes = payload + two authenticated 0x00 bytes
+Authenticator:    3 bytes = 24-bit truncated CMAC
+Freshness:        0 bytes
+</pre>
+<p>With 1-based byte numbering, MAC bytes 6–8. If a document says MAC bytes 5–7, it is using zero-based numbering or leaves byte 8 undefined; resolve that before configuring.</p>
+<h2>Step 2 — configure SecOC</h2><ol><li>Create the RX processing container.</li><li>Create <code>SecOCRxSecuredPduLayer → SecOCRxSecuredPdu</code>; reference the global secured PDU of length 8.</li><li>Set <code>SecOCSecuredRxPduVerification = TRUE</code>.</li><li>Create the Authentic PDU layer; reference a distinct global Authentic PDU of length 5.</li><li>Set authenticator truncation to 24 bits and both freshness lengths to 0. Disable AuthData freshness.</li><li>Reference the CSM MAC-verify job.</li></ol>
+<h2>Step 3 — configure PduR Path A</h2><pre>CanIf Rx secured PDU (8)
+  → PduR source: secured global PDU
+  → PduR destination: SecOC secured endpoint
+  → SecOC_RxIndication
+</pre><p>Use an IF routing path, direct provision, and no TP queue for the single Classical CAN frame. Never set the destination to COM.</p>
+<h2>Step 4 — configure PduR Path B</h2><pre>SecOC verified Authentic PDU (5)
+  → PduR source: SecOC authentic-layer PDU
+  → PduR destination: COM authentic PDU
+  → Com_RxIndication
+</pre><p>COM must model the 5-byte authentic data, not the MAC-bearing 8-byte frame.</p>
+<h2>Step 5 — verify generated behavior</h2><ul><li>CanIf receive path reaches SecOC, not COM.</li><li>CSM verifies <code>DataId || AuthenticPdu</code> against the received MAC.</li><li>Only successful verification reaches COM, with <code>SduLength = 5</code>.</li><li>Do not hand-edit calculated PduR handles, direction, routing type, or communication type.</li></ul>
+<h2>Primary source</h2><p><a href="https://www.autosar.org/fileadmin/standards/R23-11/CP/AUTOSAR_CP_SWS_SecureOnboardCommunication.pdf">AUTOSAR CP R23-11 SecOC SWS</a> and the <a href="../reference/secoc-profile2-pdur-ecuc-hv-batt.html">configuration reference card</a>.</p>
+<div class="callout"><strong>Retrieval prompt:</strong> Explain why Path A is 8 bytes while Path B is 5 bytes, and name the callback expected at each hop. Ask me if any DaVinci field is unclear.</div>
+</main></body></html>

@@ -1,0 +1,32 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PduR Csm CRY integration</title><link rel="stylesheet" href="../assets/course.css"></head><body><main><div class="kicker">Reference card · integration</div><h1>SecOC module interaction map</h1><h2>RX data path</h2><pre>CanIf → PduR → SecOC → Csm → Cry_30_Rh850Icus → ICUSE
+                                     ↓
+PduR ← verified Authentic PDU ← SecOC</pre><table><tr><th>Module</th><th>Responsibility</th></tr><tr><td>Can / CanIf</td><td>Receive the 8-byte CAN-HS frame and provide the PDU indication.</td></tr><tr><td>PduR</td><td>Route the secured PDU to SecOC and the verified Authentic PDU onward.</td></tr><tr><td>SecOC</td><td>Extract the 5-byte Authentic PDU and 3-byte MAC, assemble `02 02 || AuthenticPdu`, request verification, and forward only after success.</td></tr><tr><td>Csm</td><td>Resolve the job ID, prepare the crypto job, and dispatch `Csm_MacVerify` to the referenced primitive.</td></tr><tr><td>Cry_30_Rh850Icus</td><td>Execute AES-CMAC verification using the configured RH850 ICUSE service/workspace/key mapping.</td></tr><tr><td>ICUSE</td><td>Hardware security execution layer used by the RH850 Cry driver.</td></tr></table><h2>HV_BATT values</h2><pre>secured PDU = 8 bytes
+Authentic PDU = bytes 0..4
+padding bytes 3..4 = 00 00
+MAC = bytes 5..7, 24 bits
+CMAC input = DataId 02 02 || bytes 0..4
+</pre><h2>DaVinci tree</h2><pre>Can / CanIf
+  └─ global HV_BATT PDU, length 8
+PduR
+  ├─ lower CanIf Rx → SecOC secured-layer Rx PDU
+  └─ SecOC Authentic PDU → upper PDU / COM
+SecOC
+  └─ SecOCRxPduProcessing
+      ├─ secured PDU reference
+      ├─ Data ID bytes 02 02
+      ├─ AuthInfoTruncLength 24 bits
+      ├─ FV length 0
+      ├─ FV trunc length 0
+      ├─ secured-Rx verification TRUE
+      └─ deferred processing initially
+Csm
+  └─ CsmJob
+      ├─ CsmJobPrimitiveRef → AES-CMAC primitive
+      ├─ CsmJobKeyRef → configured key
+      └─ processing mode
+Cry_30_Rh850Icus
+  └─ CryCmacAes128VerConfig
+      ├─ CryLengthInBytes consistent with MAC length convention
+      ├─ CryKeyIdType
+      └─ workspace
+</pre><h2>Integration checklist</h2><ol><li>Configure and generate Can/CanIf global 8-byte PDU.</li><li>Route CanIf Rx to SecOC through PduR.</li><li>Configure SecOC RX Profile 2.</li><li>Configure Csm primitive, key, and verify job.</li><li>Configure Cry CMAC verification service and connect it through the delivered Cry/CryptoIf/CryIf path.</li><li>Generate and inspect job IDs, PDU IDs, Data ID bytes, lengths, and references.</li><li>Initialize Csm, Cry, and SecOC in the generated startup order.</li><li>Schedule SecOC RX main; schedule Csm/Cry main functions for asynchronous processing.</li><li>Verify valid, modified-payload, modified-padding, and modified-MAC frames.</li></ol><p class="small">The exact symbolic container names can vary by Vector package; use the delivered BSWMD and generated references as authority.</p><p><a href="../lessons/0003-pdur-csm-cry-integration.html">Open Lesson 3</a> · <a href="../reference/hv-batt-rx-mapping.html">HV_BATT reference</a></p></main></body></html>

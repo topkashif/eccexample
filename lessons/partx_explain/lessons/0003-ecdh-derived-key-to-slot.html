@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0003 — From ECDH to KEY_5: landing a derived CMAC key in ICUSE</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+
+<p class="kicker">Lesson 0003 · ICUSE Key Provisioning · ~12 minutes</p>
+<h1>From ECDH to <code>KEY_5</code>: landing a derived CMAC key in ICUSE</h1>
+
+<!-- ============================================================ -->
+<h2>The one-sentence answer</h2>
+<p>The ECDH path <em>derives</em> the key — ephemeral P-224 keys → shared secret Z → X9.63/SHA-256 KDF → 16-byte AES-128 CMAC key — but as delivered it stops at software storage and RAM_KEY; to persist it in <code>KEY_5</code> you must add one new step: wrap those 16 bytes in the SHE M1|M2|M3 update protocol (<code>SecLib_KeySHEUpdate</code>, keyId = <code>0x08</code>) — the same machinery Lesson 0001 used for DATASTORE_KEY.</p>
+
+<div class="callout">
+  <span class="title">Generated vs. derived — the return of Lesson 0002's distinction</span>
+  DATASTORE_KEY was <em>generated</em> (TRNG). This key is <em>derived</em>: its value is a deterministic function of the ECDH shared secret plus the message-group ID. Both land in ICUSE the <strong>same way</strong> — M1|M2|M3 + CMD_LOAD_KEY — because once the 16 bytes exist, ICUSE doesn't care where they came from.
+</div>
+
+<!-- ============================================================ -->
+<h2>1 · The pipeline as implemented (docs/ecc_integration_notes.md)</h2>
+<div class="path">
+  <div class="stage"><span class="who">Init · notes §2</span>
+    <code>SecLib_EccInit()</code> once after <code>SecLib_Init()</code> — RNG bridges to the ICUS PRNG; nothing else changes in the stack.</div>
+  <div class="arrow">↓</div>
+  <div class="stage"><span class="who">Ephemeral keypair · Crypto_30_CryWrapper_Hw.c:880</span>
+    <code>Hw_KeyExchangeCalcPubVal</code> → <code>SecLib_EccGenerateEphemeralKey</code>: P-224 scalar <code>d</code> (28 B, unbiased in [1, n−1]), public point <code>X‖Y</code> (56 B). <code>d</code> parked in element <code>CRYPTO_KE_KEYEXCHANGE_PRIVKEY</code> — ICUS slots untouched.</div>
+  <div class="arrow">↓</div>
+  <div class="stage"><span class="who">Exchange &amp; shared secret · Crypto_30_CryWrapper_Hw.c:947</span>
+    Peer point validated <strong>on-curve</strong> (invalid-curve hardening), then <code>K = d · Q_peer</code> via <code>SecLib_EccComputeSharedSecret</code>. Result into element <code>SHAREDVALUE</code> — 56 B (x‖y) or 28 B (x-only) per config.</div>
+  <div class="arrow">↓</div>
+  <div class="stage"><span class="who">Derive · Crypto_30_CryWrapper_Hw.c:1037</span>
+    <code>Hw_KeyDerive</code>: PASSWORD element = shared value, SALT element = message-group ID (1 B) →
+    <code>K_out = X9.63-KDF-SHA256(Z, SI)</code> truncated to <strong>16 bytes</strong>. <em>This output is your new AES-128 CMAC key.</em></div>
+  <div class="arrow">↓</div>
+  <div class="stage"><span class="who">As delivered · notes §6</span>
+    Key lives in software <code>KeyStorage</code> (TmpKey → <code>Csm_KeyCopy</code> → group key element) and, in Phase 2, is activated into the volatile <code>RAM_KEY</code> via <code>SecLib_KeyRAMUpdate</code>. <strong>Zero persistent slots — by design.</strong></div>
+</div>
+
+<p>The KDF is textbook ANSI X9.63 (seclib_ecc.c:293): per 32-byte block, <code>S<sub>i</sub> = SHA-256( Z ‖ counter<sub>BE32</sub> ‖ SI )</code>, counter starting at 1, blocks concatenated and truncated. SHA-256 runs in software (mbedtls), same as the ECP math — ICUSE has no ECC engine, and the notes record that as an agreed assurance deviation (private keys in zeroized CPU RAM, never in NVM or a protected slot).</p>
+
+<!-- ============================================================ -->
+<h2>2 · The new step: KEY_5</h2>
+<p>Your requirement changes a design boundary the notes explicitly set ("persistent slots are never written by the ECC path"). Here is what landing the key in KEY_5 takes:</p>
+<table>
+  <tr><th>Parameter</th><th>Value</th><th>Why / anchor</th></tr>
+  <tr><td>Slot</td><td><code>KEY_5</code> → raw <code>0x08</code></td><td>Cry_30_Rh850Icus_Types.h:75; manual Table 4.1 (KEYMD = 0, no extended page)</td></tr>
+  <tr><td>keyId / authKeyId</td><td><code>KEY_5</code> / <code>KEY_5</code></td><td>Self-authenticated first load — empty slot ⇒ KEY_AuthID ≡ 0¹²⁸ (manual §4.4). Alternative: authenticate with MASTER_ECU_KEY if one is provisioned.</td></tr>
+  <tr><td>Counter</td><td>1, then +1 per renewal</td><td>Monotonic anti-replay (manual §4.4). <strong>Matters more here</strong> — see the WP trap below.</td></tr>
+  <tr><td>Flags</td><td><code>KU</code> — and <strong>think hard before <code>WP</code></strong></td><td>KU = CMAC-only, exactly the requirement. WP is a one-way latch…</td></tr>
+  <tr><td>Mechanism</td><td><code>SecLib_GenerateM1M2M3</code> + <code>SecLib_KeySHEUpdate</code> → <code>CMD_LOAD_KEY</code></td><td>Reuse the Lesson-0001 machinery with <code>keyId = KEY_5</code>; nothing new is invented.</td></tr>
+  <tr><td>Prove it</td><td>CMAC generate + verify round-trip</td><td><code>SecSB_CreateKey</code>'s tail (secure_boot.c:463–480), adapted.</td></tr>
+</table>
+
+<div class="callout warn">
+  <span class="title">The WP trap — the most important design decision here</span>
+  If the ECDH key <em>rotates</em> (renegotiation per the MPKA lifecycle), a <code>WP</code>-flagged KEY_5 can <strong>never be rewritten</strong> — ICUSE rejects the update with <code>ERC_KEY_WRITE_PROTECTED</code>. DATASTORE_KEY earns WP because its value never changes. A rotating ECDH-derived key must either stay in volatile RAM_KEY (the delivered design), be loaded without WP (rewritable, protected by the protocol instead), or accept slot-in-place freeze. Decide before the first provisioning — WP cannot be undone.
+</div>
+
+<h3>Two concrete integration gaps in the current tree</h3>
+<ol>
+  <li><strong>The SecLib switch doesn't know KEY_5.</strong> <code>SecLib_MACGenerate</code>/<code>SecLib_MACVerify</code> whitelist slots: <code>BOOT_MAC_KEY, SECUREBOOT_KEY, DATASTORE_KEY, INTEGRITY_KEY, KEY_RAM</code> (crypto_library.c:238–246, 319–327). Using KEY_5 for CMAC hits <code>default → "keyId not supported"</code>. Add <code>case KEY_5:</code> to both.</li>
+  <li><strong>Bridge the layers.</strong> The derived 16 bytes currently sit in a CryWrapper <em>key element</em> (software). To reach M1M2M3 you must read them out (e.g. <code>SecLib_KeySHEUpdate</code> called with a filled <code>SecLib_KeyDataType</code>, or a small new <code>SecLib_StoreDerivedKeyInSHE(keyId, key16)</code> in the security lib that composes Lesson-0001's flow) — mind the RAM_KEY ownership policy while doing so, and wipe the software copy after CMD_LOAD_KEY succeeds.</li>
+</ol>
+
+<!-- ============================================================ -->
+<h2>3 · Knowledge check</h2>
+<div class="quiz" id="qz">
+  <fieldset data-answer="2">
+    <legend>Q1 · On P-224, what are the private scalar and public point sizes?</legend>
+    <button type="button">scalar 16 bytes, public 32 bytes</button>
+    <button type="button">scalar 32 bytes, public 64 bytes</button>
+    <button type="button">scalar 28 bytes, public 56 bytes</button>
+    <button type="button">scalar 24 bytes, public 48 bytes</button>
+    <div class="explain">seclib_ecc.h:37–39 — SECLIB_ECC_PRIVKEY_LEN 28, PUBKEY_LEN 56 (uncompressed X‖Y, big-endian). P-224 coordinates are 224 bits = 28 bytes.</div>
+  </fieldset>
+  <fieldset data-answer="1">
+    <legend>Q2 · Which KDF turns the shared secret into the CMAC key?</legend>
+    <button type="button">HMAC-SHA256 counter mode, salt key</button>
+    <button type="button">ANSI X9.63 with SHA-256 hashing</button>
+    <button type="button">SHE KDF with KEY_UPDATE constants</button>
+    <button type="button">PBKDF2 with many SHA iterations</button>
+    <div class="explain">seclib_ecc.c:293 — Si = SHA-256(Z ‖ counterBE32 ‖ SI), SI = 1-byte message-group ID; output truncated to 16 B. The SHE KDF (Lesson 0001) is a different function, used only for M1M2M3 transport keys.</div>
+  </fieldset>
+  <fieldset data-answer="3">
+    <legend>Q3 · How do the derived 16 bytes get into KEY_5?</legend>
+    <button type="button">CMD_LOAD_PLAIN_KEY targets slot five</button>
+    <button type="button">KeyElementSet writes the ICU flash</button>
+    <button type="button">M4M5 verification writes the slot</button>
+    <button type="button">M1M2M3 protocol via CMD_LOAD_KEY</button>
+    <div class="explain">Persistent slots only accept the SHE update protocol: SecLib_GenerateM1M2M3 + SecLib_KeySHEUpdate → CMD_LOAD_KEY (Lesson 0001). PLAIN_KEY is RAM_KEY-only; KeyElementSet is software storage; M4M5 is the read-back proof, not a write path.</div>
+  </fieldset>
+  <fieldset data-answer="0">
+    <legend>Q4 · Why is setting WP on KEY_5 dangerous for a rotating key?</legend>
+    <button type="button">renegotiated keys can never be written</button>
+    <button type="button">WP forces the key into RAM instead</button>
+    <button type="button">WP disables CMAC verification entirely</button>
+    <button type="button">WP erases the slot on every reset</button>
+    <div class="explain">WP is a one-way latch (manual §4.3): the slot can never be rewritten or erased. The next ECDH negotiation produces a new key that KEY_5 would refuse — ERC_KEY_WRITE_PROTECTED.</div>
+  </fieldset>
+</div>
+
+<!-- ============================================================ -->
+<h2>4 · Read next / practice</h2>
+<div class="callout">
+  <span class="title">Primary source</span>
+  <code>docs/ecc_integration_notes.md</code> §3 and §6 — the authoritative map of what was delivered, the key-element semantics, and the storage boundaries. Then ICUSE manual §4.4 for the M1M2M3 form the new step must produce.
+</div>
+<ul>
+  <li>Fact sheet: <a href="../reference/ecdh-key-load.html">ECDH → ICUSE slot pipeline</a> — the whole chain, the KEY_5 parameter set, and the integration checklist.</li>
+  <li>Practice: sketch the <code>SecLib_KeyDataType</code> struct (crypto_library_type.h:116–125) filled for KEY_5: keyId, authKeyId, UID, counter, flags, key, authKey. Check yourself against secure_boot.c:437–447.</li>
+  <li>Review: <a href="../lessons/0001-icuse-key-slots.html">Lesson 0001</a> (M1M2M3), <a href="../lessons/0002-datastore-key-lifecycle.html">Lesson 0002</a> (generated vs derived).</li>
+</ul>
+
+<div class="callout">
+  <span class="title">Your teacher</span>
+  The WP decision, the SecLib switch extension, the RAM_KEY ownership policy, the assurance deviation — if any of these feel shaky, ask. This is exactly the point where design mistakes get expensive.
+</div>
+
+<footer>
+  Citations: docs/ecc_integration_notes.md (§2–§7) · Crypto_30_CryWrapper_Hw.c:880/:947/:1037 · seclib_ecc.c:293 · crypto_library.c:238–327 · secure_boot.c:437–480 · ICUSE manual §4.3–4.4, Table 4.1.<br>
+  Course: <a href="../lessons/0001-icuse-key-slots.html">0001</a> · <a href="../lessons/0002-datastore-key-lifecycle.html">0002</a> · <a href="../reference/key-slot-map.html">key slot map</a> · <a href="../reference/datastore-integrity.html">datastore integrity</a>
+</footer>
+
+<script>
+(function () {
+  var boxes = document.querySelectorAll('#qz fieldset');
+  boxes.forEach(function (box) {
+    var buttons = box.querySelectorAll('button');
+    var explain = box.querySelector('.explain');
+    var answer = parseInt(box.getAttribute('data-answer'), 10);
+    buttons.forEach(function (btn, i) {
+      btn.addEventListener('click', function () {
+        buttons.forEach(function (b) { b.classList.remove('correct', 'wrong'); });
+        if (i === answer) { btn.classList.add('correct'); }
+        else {
+          btn.classList.add('wrong');
+          buttons[answer].classList.add('correct');
+        }
+        explain.classList.add('show');
+      });
+    });
+  });
+})();
+</script>
+</main>
+</body>
+</html>

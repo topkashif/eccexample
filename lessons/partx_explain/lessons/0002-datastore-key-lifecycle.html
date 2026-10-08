@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0002 — DATASTORE_KEY: from TRNG to the CMAC on your data</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+
+<p class="kicker">Lesson 0002 · ICUSE Key Provisioning · ~12 minutes</p>
+<h1><code>DATASTORE_KEY</code>: from TRNG to the CMAC on your data</h1>
+
+<!-- ============================================================ -->
+<h2>The one-sentence answer</h2>
+<p><code>DATASTORE_KEY</code> is <strong>not derived from anything</strong> — it is 16 bytes of on-chip TRNG entropy, wrapped in a SHE M1|M2|M3 message (whose K1–K4 are the only derived keys involved), written into slot KEY_3 with <code>KU|WP</code> flags, and from then on used <em>exclusively</em> as a CMAC key to seal 64-byte storage blocks and NvM-managed data blocks.</p>
+
+<div class="callout warn">
+  <span class="title">Vocabulary precision (this trips people up)</span>
+  <strong>Generated</strong> ≠ <strong>derived</strong>. The key <em>value</em> in KEY_3 is pure random — fresh on every ECU, unknowable offline. What <em>is</em> derived (via the SHE KDF) are the transport keys K1–K4 that encrypt and authenticate the key during registration. Deriving a slot key from a device secret (like SECRET_KEY) is a different design pattern — this project deliberately doesn't use it.
+</div>
+
+<!-- ============================================================ -->
+<h2>1 · Provisioning: the journey into KEY_3</h2>
+<p>It happens as step 2 of <code>SecSB_EnableSecurity</code> (secure_boot.c:145), only once secure boot itself is enabled or already write-protected:</p>
+<div class="path">
+  <div class="stage"><span class="who">Generate · secure_boot.c:433 → crypto_library.c:182</span>
+    <code>SecSB_GenerateRamKey</code> — ICUSE TRNG produces 16 bytes; staged into the volatile RAM_KEY as a plaintext key (<code>CMD_LOAD_PLAIN_KEY</code>).</div>
+  <div class="arrow">↓</div>
+  <div class="stage"><span class="who">Describe · secure_boot.c:437–447</span>
+    <code>keyData</code>: keyId = <code>DATASTORE_KEY</code> (→ KEY_3 → <code>0x06</code>), authKeyId = <strong>same key</strong> (self-authenticated first load, authKey = 0¹²⁸ per manual §4.4), UID = wildcard, counter = <strong>1</strong>, flags = <code>KU | WP</code>, key = the 16 random bytes.</div>
+  <div class="arrow">↓</div>
+  <div class="stage"><span class="who">Wrap · key_manager.c:99 → crypto_library.c:456</span>
+    <code>SecLib_GenerateM1M2M3</code> + <code>SecLib_KeySHEUpdate</code> — builds and ships the protected message to the driver.</div>
+  <div class="arrow">↓</div>
+  <div class="stage hw"><span class="who">Commit · Cry_30_Rh850Icus_Hw.c:1100</span>
+    <code>CMD_LOAD_KEY</code> — ICUSE decrypts, verifies and writes slot KEY_3 in the ICU region of the data flash. The value is now unreadable from outside, forever.</div>
+  <div class="arrow">↓</div>
+  <div class="stage"><span class="who">Prove · secure_boot.c:463–480</span>
+    A CMAC generate + verify round-trip over a fixed 32-byte pattern (<code>pCMACdata</code>, secure_boot.c:85) confirms the slot is live. <code>WP</code> then locks it permanently.</div>
+</div>
+
+<h3>The anatomy of M2 — where the key actually hides</h3>
+<p>M2 is the only place the plaintext key value ever travels, and it never travels as plaintext. Built byte-by-byte in <code>SecLib_GenerateM2</code> (key_manager.c:197–246):</p>
+<table>
+  <tr><th>Bytes</th><th>Content</th><th>Source</th></tr>
+  <tr><td>0–3</td><td><code>counter&lt;&lt;4 | flags[7:4]</code> (big-endian)</td><td>counter = 1, flags = KU|WP → <code>0x00 00 00 19</code> (0x10 | 0x09)</td></tr>
+  <tr><td>4</td><td><code>flags[3:0] &lt;&lt; 4</code> (plus padding)</td><td>upper flag nibble</td></tr>
+  <tr><td>5–15</td><td>zero padding (94 zero bits total)</td><td>SHE-mandated</td></tr>
+  <tr><td>16–31</td><td><strong>the new 16-byte key</strong></td><td>the TRNG bytes from RAM_KEY</td></tr>
+</table>
+<p>This 32-byte block is AES-CBC encrypted with <code>K1 = KDF(KEY_AuthID, KEY_UPDATE_ENC_C)</code> (IV = 0). Note the neat implementation trick: since AuthID = ID and the slot is empty, KEY_AuthID behaves as all-zeros — so K1/K2 are derived from the <strong>all-zero auth key</strong> (key_manager.c:233, 285), loaded temporarily into RAM_KEY to run the AES/CMAC primitives. ICUSE then unwraps M2 inside the secure unit, where the value never re-appears on any bus.</p>
+
+<!-- ============================================================ -->
+<h2>2 · The job: sealing data at rest</h2>
+<p>Once provisioned, <code>DATASTORE_KEY</code> appears in exactly two protection mechanisms — both CMAC-only, as <code>KU</code> dictates.</p>
+
+<h3>Mechanism A — the <code>hsto_</code> secure API (data_protection.c)</h3>
+<p>A secure block is exactly <code>BLOCK_SIZE</code> = 64 bytes (crypto_library.h:49) with a fixed layout:</p>
+<div class="path">
+  <div class="stage"><span class="who">bytes 0–15</span> CMAC — computed over the payload, stored by the writer</div>
+  <div class="stage"><span class="who">bytes 16–63</span> payload — stored <strong>in plaintext</strong> (integrity, not confidentiality)</div>
+</div>
+<p><strong>Write</strong> — <code>hsto_WriteSecure</code> (data_protection.c:106): CMAC over <code>data[16..63]</code> generated with DATASTORE_KEY and written into <code>data[0..15]</code>; the 64-byte block then goes to the master location (flash address or NvM block). With <code>FLS_DRIVER</code>, a failed master write falls back to a backup block at <code>target + BLOCK_SIZE</code>.</p>
+<p><strong>Read</strong> — <code>hsto_ReadSecure</code> (data_protection.c:22): CMAC over <code>data[16..63]</code> recomputed and compared against the stored <code>data[0..15]</code>. On mismatch: pre-secure-boot builds retry the backup block; once secure boot is enabled the payload is <strong>zeroized and an error returned</strong> (data_protection.c:84). The consumer never sees unverified data.</p>
+
+<h3>Mechanism B — NvM callbacks (nvm_driver.c)</h3>
+<p>For AUTOSAR NvM-managed blocks, the same key works through the standard hook points — no caller changes needed:</p>
+<table>
+  <tr><th>Hook</th><th>Function</th><th>When</th></tr>
+  <tr><td>Write callback</td><td><code>SecLib_NVM_MACVerify_Write</code> (nvm_driver.c:541)</td><td>Computes the CMAC with DATASTORE_KEY over the block's data region and embeds it before the write</td></tr>
+  <tr><td>PostReadTransformation</td><td><code>SecLib_NVM_MACVerify_Read</code> (nvm_driver.c:596)</td><td>Recomputes and verifies; on failure returns E_NOT_OK so <strong>NvM reports the block as INTEGRITY_FAILED</strong></td></tr>
+</table>
+<p>Protected block families in this codebase: <code>SAM</code> (MAC ‖ data), <code>Dataset</code> (two security-log entries, two CMACs each), and <code>ODOM_01…10</code> odometer blocks in the CLI variant. All share the one DATASTORE_KEY.</p>
+
+<!-- ============================================================ -->
+<h2>3 · What this buys you — and what it doesn't</h2>
+<table>
+  <tr><th>Property</th><th>Covered?</th><th>Why</th></tr>
+  <tr><td>Integrity (tamper detection)</td><td>✅</td><td>Any bit flipped in payload or MAC → CMAC verify fails → block zeroized / INTEGRITY_FAILED</td></tr>
+  <tr><td>Authenticity (origin)</td><td>✅</td><td>Forging a valid CMAC requires the key inside KEY_3, which cannot leave ICUSE and is CMAC-only (<code>KU</code>), frozen (<code>WP</code>)</td></tr>
+  <tr><td>Confidentiality</td><td>❌</td><td>Payload is stored in the clear; CMAC seals, it does not encrypt</td></tr>
+  <tr><td>Freshness / anti-rollback</td><td>❌</td><td>An attacker with old flash copies can replay a whole old-but-valid block; nothing in the MAC binds it to "now"</td></tr>
+</table>
+<div class="callout">
+  <span class="title">Attacker's dilemma</span>
+  To tamper with protected data, an attacker must produce a new valid CMAC — which requires the key. The key lives in an unreadable ICU-region slot, restricted to CMAC operations, and WP makes even ICUSE refuse to rewrite it. The cheapest attack becomes physically opening the chip — a fundamentally different (and much more expensive) class of adversary.
+</div>
+
+<!-- ============================================================ -->
+<h2>4 · Knowledge check</h2>
+<div class="quiz" id="qz">
+  <fieldset data-answer="0">
+    <legend>Q1 · Where does the key value inside KEY_3 come from?</legend>
+    <button type="button">the ICUSE true random generator</button>
+    <button type="button">a KDF from the SECRET_KEY</button>
+    <button type="button">a factory tool over UDS</button>
+    <button type="button">constants compiled into the application</button>
+    <div class="explain">SecSB_GenerateRamKey → SecLib_RandomGenerate (TRNG). The value is generated, not derived; K1–K4 are derived, but they only protect the transport of M2, not the key's origin.</div>
+  </fieldset>
+  <fieldset data-answer="0">
+    <legend>Q2 · In a 64-byte secure block, where does the CMAC sit?</legend>
+    <button type="button">CMAC first, then payload bytes</button>
+    <button type="button">payload first, then CMAC bytes</button>
+    <button type="button">CMAC sandwiched between payload halves</button>
+    <button type="button">CMAC at payload middle offset</button>
+    <div class="explain">data_protection.c:48,120 — the MAC occupies data[0..15], the CMAC is computed over data[16..63]. 16 bytes of MAC + 48 bytes of payload.</div>
+  </fieldset>
+  <fieldset data-answer="0">
+    <legend>Q3 · What do the KU and WP flags jointly enforce on KEY_3?</legend>
+    <button type="button">CMAC only, and frozen forever</button>
+    <button type="button">encryption only, and frozen forever</button>
+    <button type="button">CMAC only, and freely rewritable</button>
+    <button type="button">encryption only, and freely rewritable</button>
+    <div class="explain">KU=1 forbids ECB/CBC and permits CMAC generate/verify (manual Table 4.2); WP is a one-way latch — the slot can never be rewritten or erased (manual §4.3).</div>
+  </fieldset>
+  <fieldset data-answer="0">
+    <legend>Q4 · CMAC verification fails on read while secure boot is enabled. What happens?</legend>
+    <button type="button">payload is zeroed and error returned</button>
+    <button type="button">backup block is accepted without verification</button>
+    <button type="button">payload is served with a warning</button>
+    <button type="button">key slot is erased and regenerated</button>
+    <div class="explain">data_protection.c:79–86 — after secure boot is enabled there is no fallback: the whole block is memset to 0 and the error is returned. Backup fallback only exists pre-enable and under FLS_DRIVER.</div>
+  </fieldset>
+</div>
+
+<!-- ============================================================ -->
+<h2>5 · Read next / practice</h2>
+<div class="callout">
+  <span class="title">Primary source</span>
+  ICUSE User Manual (docs/rh850_f1km_icuse_usermanual.pdf), <strong>§4.4 "How to Register Keys", pages 43–45</strong> for the M1–M5/KDF registration protocol, and §4.3 Table 4.2 for the flags. For the CMAC primitive itself, the HIS SHE specification (linked in RESOURCES.md) shows why AES-CMAC is the integrity workhorse.
+</div>
+<ul>
+  <li>Companion fact sheet: <a href="../reference/datastore-integrity.html">DATASTORE_KEY &amp; data-at-rest integrity</a> — block layout, flows, KDF formula, all anchors on one page.</li>
+  <li>Practice: open <code>data_protection.c</code> and trace one write + one read of a secure block against the fact sheet. Then explain to yourself why <code>SecSB_EnableSecurity</code> creates DATASTORE_KEY <em>before</em> writing the SAM block.</li>
+  <li>Review: <a href="../lessons/0001-icuse-key-slots.html">Lesson 0001</a> (slot map) and <a href="../reference/key-slot-map.html">the Key Slot Map</a> — DATASTORE_KEY's row is the KEY_3 row.</li>
+</ul>
+
+<div class="callout">
+  <span class="title">Your teacher</span>
+  Stuck on the M2 bit layout, the SHE KDF, or why backup fallback disappears after secure boot is enabled? Ask in the chat — no question is too small, and the quiz is much more valuable if you interrogate every wrong answer.
+</div>
+
+<footer>
+  Citations: RH850/F1KM ICUSE User Manual R01UH0703EJ0100 Rev.1.00 §4.3–4.4, §5.6.7 · project <code>security/secure_boot/secure_boot.c</code>, <code>security/crypto_lib/{crypto_library.c,key_manager.c}</code>, <code>security/hta_storage/{data_protection.c,nvm_driver.c}</code>.<br>
+  Course: <a href="../lessons/0001-icuse-key-slots.html">0001 — where do the keys live?</a> · <a href="../reference/key-slot-map.html">reference — key slot map</a> · <a href="../reference/datastore-integrity.html">reference — datastore integrity</a>
+</footer>
+
+<script>
+(function () {
+  var boxes = document.querySelectorAll('#qz fieldset');
+  boxes.forEach(function (box) {
+    var buttons = box.querySelectorAll('button');
+    var explain = box.querySelector('.explain');
+    var answer = parseInt(box.getAttribute('data-answer'), 10);
+    buttons.forEach(function (btn, i) {
+      btn.addEventListener('click', function () {
+        buttons.forEach(function (b) { b.classList.remove('correct', 'wrong'); });
+        if (i === answer) { btn.classList.add('correct'); }
+        else {
+          btn.classList.add('wrong');
+          buttons[answer].classList.add('correct');
+        }
+        explain.classList.add('show');
+      });
+    });
+  });
+})();
+</script>
+</main>
+</body>
+</html>

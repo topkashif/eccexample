@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Lesson 4 — DaVinci container-by-container SecOC configuration</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <div class="kicker">Lesson 04 · ECUC configuration</div>
+  <h1>Configure one RX-only SecOC Profile 2 PDU, container by container</h1>
+  <p class="lede">This is the practical DaVinci configuration map for the RH850 F1K1 ICUSE receiver. It separates AUTOSAR container semantics from Vector-specific names and keeps the HV_BATT byte contract visible at every step.</p>
+
+  <div class="callout">
+    <strong>Mission link.</strong> Configure and later prove this exact contract: Classical CAN, an 8-byte secured PDU, a 5-byte Authentic PDU, a 3-byte authenticator, AES-128 CMAC, 24-bit MSB truncation, and no freshness value.
+  </div>
+
+  <h2>0. Freeze the contract before opening DaVinci</h2>
+  <table>
+    <tr><th>Object</th><th>Required value</th><th>Where it belongs</th></tr>
+    <tr><td>Physical secured CAN PDU</td><td>8 bytes: payload bytes 0–4, MAC bytes 5–7</td><td>CAN matrix / CanIf / SecOC secured PDU</td></tr>
+    <tr><td>Authentic PDU</td><td>5 bytes: <code>CAN[0..4]</code>, including padding <code>00 00</code></td><td>SecOC RX Authentic PDU layer</td></tr>
+    <tr><td>Data Identifier</td><td><code>0x0202</code>, encoded for CMAC as <code>02 02</code></td><td>SecOC RX PDU processing</td></tr>
+    <tr><td>DataToAuthenticator</td><td><code>02 02 || CAN[0] || CAN[1] || CAN[2] || 00 || 00</code>, 7 bytes</td><td>SecOC internal cryptographic buffer</td></tr>
+    <tr><td>Authenticator</td><td><code>CAN[5..7]</code>, 24 bits</td><td>SecOC cryptographic extraction / CSM verify input</td></tr>
+  </table>
+  <div class="callout caution">
+    <strong>Length trap.</strong> Do not configure a 7-byte SecOC Authentic PDU or a 3-byte secured area. The routed Authentic PDU is 5 bytes. The 7-byte quantity is the internal DataToAuthenticator buffer after SecOC prepends the 2-byte Data ID.
+  </div>
+
+  <h2>1. Global PDU objects: the shared references</h2>
+  <p>Before configuring module-specific containers, make sure the project contains global PDU objects that every module can reference. The AUTOSAR specifications describe these as references to a global PDU; Vector's project model may present them through the communication description and generated PDU handles.</p>
+  <div class="card">
+    <h3>Required global PDU concepts</h3>
+    <ul>
+      <li><strong>HV_BATT_SecuredPdu:</strong> the physical 8-byte CAN PDU received by SecOC.</li>
+      <li><strong>HV_BATT_AuthenticPdu:</strong> the 5-byte data portion delivered upward after successful verification.</li>
+      <li><strong>Optional cryptographic PDU:</strong> not needed for this single-frame layout. Use the SecOC single <code>SecOCRxSecuredPdu</code> choice, not <code>SecOCRxSecuredPduCollection</code>.</li>
+    </ul>
+    <p class="small">The names above are instructional names, not mandatory Vector short names. Use your project's actual global PDU names.</p>
+  </div>
+
+  <h2>2. CanIf: accept exactly the Classical CAN frame</h2>
+  <p>In the AUTOSAR R23-11 CAN Interface specification, the receive configuration is under <code>CanIf/CanIfInitCfg/CanIfRxPduCfg</code>. The local Vector BSWMD uses the same concepts.</p>
+  <table>
+    <tr><th>CanIf container / parameter</th><th>HV_BATT setting</th><th>Why</th></tr>
+    <tr><td><code>CanIfRxPduCfg</code></td><td>Create one receive L-PDU</td><td>Represents the received CAN message.</td></tr>
+    <tr><td><code>CanIfRxPduCanId</code></td><td>Your specified HV_BATT CAN ID</td><td>Must match the sender's CAN identifier.</td></tr>
+    <tr><td><code>CanIfRxPduCanIdType</code></td><td><code>STANDARD_NO_FD_CAN</code> or <code>EXTENDED_NO_FD_CAN</code></td><td>Choose according to the actual 11-bit/29-bit identifier. The <code>NO_FD</code> literal makes the Classical CAN requirement explicit.</td></tr>
+    <tr><td><code>CanIfRxPduDlc</code> / <code>CanIfRxPduDataLength</code></td><td>8</td><td>The physical secured PDU is exactly 8 bytes.</td></tr>
+    <tr><td><code>CanIfRxPduDlcCheck</code> and/or data-length check</td><td>Enable according to project policy; expected length is 8</td><td>Reject a frame that cannot satisfy the secured-PDU length contract.</td></tr>
+    <tr><td><code>CanIfRxPduHrhIdRef</code></td><td>Reference the RH850 CAN driver's receive HRH</td><td>Connects this Rx PDU to the CAN controller receive hardware object.</td></tr>
+    <tr><td><code>CanIfRxPduRef</code></td><td>Reference <code>HV_BATT_SecuredPdu</code></td><td>Harmonizes the PDU handle with the communication stack.</td></tr>
+    <tr><td><code>CanIfRxPduUserRxIndicationUL</code></td><td><code>PDUR</code></td><td>CanIf invokes the PduR receive indication.</td></tr>
+  </table>
+  <p>For the fixed PDU, do not configure a CAN-ID range, dynamic Rx ID, CAN XL container, or CAN-FD type. Confirm the 16-bit signal's byte serialization against the sender's DBC; SecOC authenticates the resulting bytes, not the signal's engineering value.</p>
+  <p><a href="https://www.autosar.org/fileadmin/standards/R23-11/CP/AUTOSAR_CP_SWS_CANInterface.pdf">Primary source: AUTOSAR CAN Interface R23-11, section 10.1.7 <code>CanIfRxPduCfg</code></a>.</p>
+
+  <h2>3. PduR: create two ordinary IF routing paths</h2>
+  <p>AUTOSAR PduR routing is static. A routing path has one source and one or more destinations. PduR forwards the <code>PduInfoType</code>; it does not inspect or modify the CMAC payload.</p>
+  <div class="grid">
+    <div class="card">
+      <h3>Path A — secured PDU into SecOC</h3>
+      <ol>
+        <li>Create a <code>PduRRoutingPath</code> for communication-interface reception.</li>
+        <li>Create <code>PduRSrcPdu</code> referencing the CanIf receive PDU.</li>
+        <li>Create <code>PduRDestPdu</code> referencing the SecOC secured-layer PDU.</li>
+        <li>Use the generated source and destination handle IDs; do not hand-edit calculated IDs.</li>
+      </ol>
+      <pre>CanIf Rx PDU (8 bytes)
+  → PduR source
+  → SecOC secured Rx PDU</pre>
+    </div>
+    <div class="card">
+      <h3>Path B — verified Authentic PDU upward</h3>
+      <ol>
+        <li>Create a second IF routing path.</li>
+        <li>Use the SecOC authentic-layer PDU as the source.</li>
+        <li>Use the COM or upper consumer PDU as the destination.</li>
+        <li>Configure the destination for direct IF data provision initially.</li>
+      </ol>
+      <pre>SecOC Authentic PDU (5 bytes)
+  → PduR source
+  → COM / upper consumer</pre>
+    </div>
+  </div>
+  <p>For this single-frame, non-TP path, omit TP thresholds, gateway buffers, TriggerTransmit provision, fan-in, and routing-path queues unless the rest of the project specifically requires them. The AUTOSAR PduR section-10 containers are <code>PduRRoutingPaths</code>, <code>PduRRoutingPath</code>, <code>PduRSrcPdu</code>, and <code>PduRDestPdu</code>.</p>
+  <div class="callout caution"><strong>If Path A currently points to COM:</strong> that is a direct CanIf → COM route, not the secured receive route, unless the GUI is showing only global-PDU ownership. The decisive check is generated code: Path A must ultimately call <code>SecOC_RxIndication</code>; COM belongs on the separate post-verification Path B. See <a href="0005-pdur-path-a-and-b-routing.html">Lesson 5 — PduR Path A and Path B</a>.</div>
+  <p><a href="https://www.autosar.org/fileadmin/standards/R23-11/CP/AUTOSAR_CP_SWS_PDURouter.pdf">Primary source: AUTOSAR PDU Router R23-11, sections 10.2.6–10.2.9</a>.</p>
+
+  <h2>4. SecOC: configure the RX security object</h2>
+  <p>SecOC's <code>SecOCRxPduProcessing</code> is the central per-PDU container. Configure one instance for HV_BATT and choose the single secured-PDU layer.</p>
+  <table>
+    <tr><th>SecOC container / parameter</th><th>Recommended value</th><th>Purpose</th></tr>
+    <tr><td><code>SecOCRxPduProcessing</code></td><td>One RX instance for HV_BATT</td><td>Holds the verification properties.</td></tr>
+    <tr><td><code>SecOCAuthInfoTruncLength</code></td><td><strong>24 bits</strong></td><td>Three received MAC bytes; AUTOSAR truncation is from the MAC MSB side.</td></tr>
+    <tr><td><code>SecOCDataId</code></td><td><strong>0x0202</strong></td><td>Unique Secured-I-PDU identifier; encoded into DataToAuthenticator as <code>02 02</code>.</td></tr>
+    <tr><td><code>SecOCFreshnessValueLength</code></td><td><strong>0 bits</strong></td><td>No complete FV exists for Profile 2.</td></tr>
+    <tr><td><code>SecOCFreshnessValueTruncLength</code></td><td><strong>0 bits</strong></td><td>No FV bytes are carried or included.</td></tr>
+    <tr><td><code>SecOCUseAuthDataFreshness</code></td><td><strong>FALSE</strong></td><td>Do not reuse a payload field as freshness.</td></tr>
+    <tr><td><code>SecOCAuthenticationVerifyAttempts</code></td><td>0 initially</td><td>Per AUTOSAR semantics, zero means one verification attempt.</td></tr>
+    <tr><td><code>SecOCReceptionOverflowStrategy</code></td><td><code>REJECT</code> initially</td><td>Avoid silently replacing a frame while the crypto path is being validated.</td></tr>
+    <tr><td><code>SecOCPduProcessing</code></td><td><code>DEFERRED</code></td><td>Process outside the CAN receive interrupt in <code>SecOC_MainFunctionRx</code>.</td></tr>
+    <tr><td><code>SecOCRxAuthServiceConfigRef</code></td><td>Reference the CSM MAC-verify job</td><td>Connects SecOC to Csm through the generated symbolic job reference.</td></tr>
+    <tr><td><code>SecOCRxPduMainFunctionRef</code></td><td>Reference the RX main function if multiple exist</td><td>Required by the standard when more than one RX main-function instance is configured.</td></tr>
+  </table>
+
+  <h3>Freshness-related parameters: an important generator detail</h3>
+  <p>Profile 2 has no freshness value, but the generic AUTOSAR RX container still exposes freshness-related parameters, including <code>SecOCFreshnessValueId</code>. Your Vector BSWMD may make some of them mandatory at ECUC level. Follow the DaVinci validator for multiplicity, but do not add a real freshness manager or a fake freshness value to the protocol. Set both lengths to zero, set <code>SecOCUseAuthDataFreshness</code> to false, and inspect generated code to confirm no non-zero freshness bytes enter DataToAuthenticator.</p>
+
+  <h3>SecOC secured-PDU choice</h3>
+  <ul>
+    <li>Create <code>SecOCRxSecuredPduLayer</code> → <code>SecOCRxSecuredPdu</code>.</li>
+    <li>Set <code>SecOCAuthPduHeaderLength = 0</code>; there is no secured-PDU header in this contract.</li>
+    <li>Set <code>SecOCSecuredRxPduVerification = TRUE</code>.</li>
+    <li>Set <code>SecOCRxSecuredLayerPduRef</code> to <code>HV_BATT_SecuredPdu</code>.</li>
+    <li>Create <code>SecOCRxAuthenticPduLayer</code> and reference <code>HV_BATT_AuthenticPdu</code>.</li>
+    <li>Do not create <code>SecOCRxSecuredPduCollection</code>; that choice is for separate Authentic and Cryptographic PDUs.</li>
+  </ul>
+
+  <h3>Secured area</h3>
+  <p>Preferred: omit <code>SecOCRxPduSecuredArea</code>. The AUTOSAR and local Vector BSWMD descriptions state that the complete Authentic PDU is then input to the authentication algorithm.</p>
+  <p>If your DaVinci release requires an explicit container, use:</p>
+  <pre>SecOCSecuredRxPduOffset = 0 bytes
+SecOCSecuredRxPduLength = 5 bytes</pre>
+  <p>Never use length 3: that would exclude the two authenticated zero-padding bytes.</p>
+  <p><a href="https://www.autosar.org/fileadmin/standards/R23-11/CP/AUTOSAR_CP_SWS_SecureOnboardCommunication.pdf">Primary source: AUTOSAR SecOC R23-11, sections 7.10.4 and 10.1.7–10.1.23</a>; see also <a href="../reference/hv-batt-rx-mapping.html">the HV_BATT mapping reference</a>.</p>
+
+  <h2>5. Csm: configure the MAC verification job</h2>
+  <p>CSM separates the job interface from the cryptographic primitive. For this receiver, configure one MAC-verify primitive, one CSM job, a key reference, and a queue/channel appropriate for the RH850 crypto driver.</p>
+  <table>
+    <tr><th>CSM container / parameter</th><th>HV_BATT setting</th><th>Check</th></tr>
+    <tr><td><code>CsmJobs/CsmJob</code></td><td>One verification job</td><td>The container short name becomes the symbolic job identifier.</td></tr>
+    <tr><td><code>CsmJobId</code></td><td>Generated/consecutive ID</td><td>SecOC must reference the symbolic job, not a guessed numeric ID.</td></tr>
+    <tr><td><code>CsmJobPrimitiveRef</code></td><td>Reference the CMAC verify primitive</td><td>Must resolve to <code>CsmPrimitives/CsmMacVerify/...</code>.</td></tr>
+    <tr><td><code>CsmJobKeyRef</code></td><td>Reference the AES-128 verification key</td><td>Use the project's secure key provisioning path; never place a production key in training files.</td></tr>
+    <tr><td><code>CsmJobQueueRef</code></td><td>Reference the queue/channel serving the RH850 CRY object</td><td>The queue connects CSM to a crypto driver object and handles a busy driver.</td></tr>
+    <tr><td><code>CsmProcessingMode</code></td><td>Start with <code>CRYPTO_PROCESSING_SYNC</code> if supported by the ICUSE integration</td><td>Use async only when the driver/package requires it and callbacks/main functions are configured.</td></tr>
+    <tr><td><code>CsmJobPrimitiveCallbackRef</code></td><td>Required for asynchronous processing</td><td>Callback must return the result to SecOC's generated handling.</td></tr>
+  </table>
+
+  <h3>CSM MAC verification primitive</h3>
+  <p>Create <code>CsmPrimitives/CsmMacVerify/CsmMacVerifyConfig</code> with:</p>
+  <pre>CsmMacVerifyAlgorithmFamily          = CRYPTO_ALGOFAM_AES
+CsmMacVerifyAlgorithmMode            = CRYPTO_ALGOMODE_CMAC
+CsmMacVerifyAlgorithmSecondaryFamily = CRYPTO_ALGOFAM_NOT_SET
+CsmMacVerifyAlgorithmKeyLength       = 16 bytes
+</pre>
+  <p>The AUTOSAR CSM definition describes <code>CsmMacVerifyCompareLength</code> as the MAC-buffer length in bits for the synchronous RTE service interface, and <code>CsmMacVerifyDataMaxLength</code> as the data-buffer size for that interface. These are not automatically the same as the SecOC generated-function path. If your job uses <code>CRYPTO_USE_FNC</code>, do not invent these values solely from the presence of the parameter; follow the Vector validator and generated CSM configuration. If the active interface requires them, the values corresponding to this PDU are <strong>24 bits</strong> for the compared MAC and <strong>7 bytes</strong> for the maximum DataToAuthenticator input.</p>
+  <p><a href="https://www.autosar.org/fileadmin/standards/R23-11/CP/AUTOSAR_CP_SWS_CryptoServiceManager.pdf">Primary source: AUTOSAR Crypto Service Manager R23-11, sections 10.2.4–10.2.5 and 10.2.17–10.2.18</a>.</p>
+
+  <h2>6. Crypto driver / ICUSE: complete the lower reference chain</h2>
+  <p>The logical chain must be visible in the generated configuration:</p>
+  <pre>SecOC SecOCRxAuthServiceConfigRef
+  → CsmJob
+      → CsmJobPrimitiveRef
+          → CsmMacVerifyConfig
+              → Crypto_30_CryWrapper primitive: AES-CMAC verify
+                  → Crypto driver object / Cry_30_Rh850Icus
+                      → CryCmacAes128VerConfig
+                          → RH850 ICUSE</pre>
+  <p>In the local Crypto wrapper BSWMD, the example primitive named <code>AesCmacVerify</code> uses <code>CRYPTO_ALGOMODE_CMAC</code> and <code>CRYPTO_MAC_VERIFY</code>, and its driver-object reference targets a <code>CryCmacAes128VerConfig</code> choice. Use the actual primitive and driver-object names available in your installed Vector/RH850 package.</p>
+  <div class="callout caution">
+    <strong>ICUSE boundary.</strong> SecOC should not call ICUSE directly. If key loading, key IDs, workspace indices, or driver initialization differ in your RH850 package, the Cry/ICUSE Technical Reference and generated configuration take precedence over this generic map.
+  </div>
+
+  <h2>7. Scheduling and initialization</h2>
+  <ol>
+    <li>Initialize the configured CAN driver and CanIf through the project's EcuM startup sequence.</li>
+    <li>Initialize the crypto driver / CRY adapter and CSM using the generated startup sequence.</li>
+    <li>Initialize PduR and SecOC.</li>
+    <li>Schedule <code>SecOC_MainFunctionRx</code> at the configured <code>SecOCMainFunctionPeriodRx</code>.</li>
+    <li>For asynchronous CSM/CRY, also schedule the generated CSM/crypto-driver main processing required by that package and enable the callback path.</li>
+  </ol>
+  <p>R23-11 specifies the RX main-function period in <code>SecOCMainFunctionRx/SecOCMainFunctionPeriodRx</code>. The local Vector BSWMD additionally exposes <code>SecOCPduProcessing = DEFERRED|IMMEDIATE</code> and asynchronous CSM callback processing options. Do not choose asynchronous mode merely because ICUSE exists; choose it when the installed driver integration requires it.</p>
+
+  <h2>8. Generated-code inspection: the first proof</h2>
+  <p>After generation, search the generated output and record the actual symbols. The exact filenames vary by DaVinci release, but the following facts must be visible:</p>
+  <ul>
+    <li>CanIf Rx PDU: CAN ID, Classical CAN type, DLC/data length 8, PduR upper-layer indication.</li>
+    <li>PduR: one CanIf → SecOC secured route and one SecOC Authentic → upper route.</li>
+    <li>SecOC RX table: AuthInfo length 24 bits, Data ID 0x0202, FV lengths 0, secured verification enabled, secured PDU length 8, Authentic PDU length 5.</li>
+    <li>SecOC generated verification path calls <code>Csm_MacVerify</code> with the authentication-layer/job ID, DataToAuthenticator pointer/length, received authenticator pointer, received authenticator length, and result pointer.</li>
+    <li>The generated DataToAuthenticator length is 7 bytes, and the data buffer contains the two Data ID bytes followed by all five Authentic PDU bytes.</li>
+    <li>CSM job resolves to AES + CMAC + MAC Verify + the intended key and queue.</li>
+    <li>Crypto wrapper/CRY resolves to the RH850 ICUSE AES-CMAC verification service.</li>
+  </ul>
+  <p>The local Vector implementation provides a strong checkpoint: its RX verification code adds the RX Data ID, copies the full freshness value, selects the secured area, then calls <code>Csm_MacVerify</code>; after a successful result it forwards the Authentic PDU upward. This is the exact point where a wrong secured-area length or wrong Data ID becomes observable.</p>
+
+  <h2>9. Small verification exercise</h2>
+  <p>Without opening DaVinci, retrieve the configuration mentally:</p>
+  <div class="card">
+    <p><strong>Question:</strong> Which three values must be different between the physical secured PDU and the CMAC input?</p>
+    <p class="small">Answer after thinking: physical length is 8, Authenticator is physically present in bytes 5–7 but absent from DataToAuthenticator, and DataToAuthenticator additionally contains the 2-byte Data ID.</p>
+  </div>
+  <p>Then validate four frames on the ECU or test bench:</p>
+  <ol>
+    <li>Valid payload, padding <code>00 00</code>, valid MAC → Authentic PDU is forwarded.</li>
+    <li>Change CAN byte 0, keep MAC → verification fails.</li>
+    <li>Change CAN byte 3 or 4 from zero, keep MAC → verification fails because padding is authenticated.</li>
+    <li>Change one MAC byte → verification fails and the Authentic PDU is not forwarded.</li>
+  </ol>
+
+  <h2>10. Source map</h2>
+  <ul>
+    <li><a href="https://www.autosar.org/fileadmin/standards/R23-11/CP/AUTOSAR_CP_SWS_SecureOnboardCommunication.pdf">AUTOSAR SecOC R23-11</a>: profile 2, DataToAuthenticator, RX containers, secured area, and main function.</li>
+    <li><a href="https://www.autosar.org/fileadmin/standards/R23-11/CP/AUTOSAR_CP_SWS_PDURouter.pdf">AUTOSAR PduR R23-11</a>: routing paths, source PDU, destination PDU.</li>
+    <li><a href="https://www.autosar.org/fileadmin/standards/R23-11/CP/AUTOSAR_CP_SWS_CryptoServiceManager.pdf">AUTOSAR CSM R23-11</a>: jobs, keys, queues, MAC verify primitive, AES/CMAC selection.</li>
+    <li><a href="https://www.autosar.org/fileadmin/standards/R23-11/CP/AUTOSAR_CP_SWS_CANInterface.pdf">AUTOSAR CanIf R23-11</a>: receive PDU ID, CAN ID/type, data length, HRH, and PduR indication.</li>
+    <li><a href="../reference/pdur-csm-cry-integration.html">Previous integration reference</a> and <a href="../reference/secoc-profile2-cheatsheet.html">Profile 2 cheat sheet</a>.</li>
+  </ul>
+
+  <div class="callout"><strong>Next step.</strong> If you share the generated ECUC ARXML or screenshots of the SecOC, PduR, CSM, and Crypto configuration pages, ask me to build a symbol-by-symbol review table. Ask follow-up questions whenever a container or generated reference is unclear.</div>
+</main>
+</body>
+</html>

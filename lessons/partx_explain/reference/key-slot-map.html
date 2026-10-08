@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ICUSE Key Slot Map &amp; Glossary — RH850/F1K + MICROSAR Crypto</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+
+<p class="kicker">Reference · ICUSE Key Provisioning Course</p>
+<h1>Key Slot Map &amp; Glossary</h1>
+<p><em>The compressed essence of <a href="../lessons/0001-icuse-key-slots.html">Lesson 0001</a> — keep this beside you when reading the security stack or the DaVinci configuration.</em></p>
+
+<!-- ============================================================ -->
+<h2>1 · The four name layers</h2>
+<p>A single key travels under four different names. Everything else follows from this stack:</p>
+<div class="path">
+  <div class="stage"><span class="who">Layer 1 — Application alias · crypto_library_type.h:214–228</span>
+    <code>SECUREBOOT_KEY</code>, <code>JTAG_KEY</code>, <code>DATASTORE_KEY</code>, <code>INTEGRITY_KEY</code> — roles invented by the project. Under <code>KEYRAM_AS_KEY</code> all four collapse onto <code>KEY_RAM</code>.</div>
+  <div class="arrow">↓</div>
+  <div class="stage"><span class="who">Layer 2 — SHE enum · crypto_library_type.h:97–114</span>
+    <code>KEY_1</code>…<code>KEY_10</code>, <code>KEY_RAM</code>, <code>MASTER_ECU_KEY</code>… — generic SHE slot names, values copied from the driver.</div>
+  <div class="arrow">↓</div>
+  <div class="stage"><span class="who">Layer 3 — Raw KEY_ID · Cry_30_Rh850Icus_Types.h:67–82</span>
+    <code>CRY_KEYID_RAW_*</code> numeric IDs (0x00–0x0E). These go into M1 byte 15 and into the ICUS0ICRCMD register.</div>
+  <div class="arrow">↓</div>
+  <div class="stage hw"><span class="who">Layer 4 — Hardware · ICUSE manual §4.1, Table 4.1</span>
+    Memory slots in the ICU region of the <strong>data flash</strong>; the RAM key lives in ICUSE-internal RAM. Key material is never readable from outside.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2>2 · Project key assignments (default build)</h2>
+<table>
+  <tr><th>Application alias</th><th>Slot</th><th>Raw KEY_ID</th><th>Flags at load</th><th>Used by</th></tr>
+  <tr><td><code>SECUREBOOT_KEY</code></td><td><code>KEY_1</code></td><td><code>0x04</code></td><td><code>KU | WP</code></td><td>CMAC over app/flasher images (<code>SecSB_WriteImageCMAC</code> / <code>VerifyImageCMAC</code>)</td></tr>
+  <tr><td><code>JTAG_KEY</code></td><td><code>KEY_2</code></td><td><code>0x05</code></td><td>— (loaded elsewhere)</td><td>JTAG password encryption</td></tr>
+  <tr><td><code>DATASTORE_KEY</code></td><td><code>KEY_3</code></td><td><code>0x06</code></td><td><code>KU | WP</code></td><td>HTA / datastore protection (<code>SecSB_EnableSecurity</code> step 2)</td></tr>
+  <tr><td><code>INTEGRITY_KEY</code></td><td><code>KEY_4</code></td><td><code>0x07</code></td><td><code>KU | WP</code></td><td>Integrity module (<code>SecSB_EnableSecurity</code> step 3)</td></tr>
+  <tr><td>(working key)</td><td><code>KEY_RAM</code></td><td><code>0x0E</code></td><td>none (RAM key has no flags)</td><td>Carrier for fresh TRNG material during provisioning</td></tr>
+</table>
+<p class="cite">Anchors: secure_boot.c:145,162 (DATASTORE/INTEGRITY), secure_boot.c:361 (SECUREBOOT in <code>keyData</code>), crypto_library_type.h:224–227.</p>
+
+<div class="callout warn">
+  <span class="title">Compile-variant switch</span>
+  With <code>KEYRAM_AS_KEY</code> defined (crypto_library_type.h:214–219) all four aliases become <code>KEY_RAM</code>: keys are then loaded as plain keys into the volatile RAM slot and do not survive power-off. The default build uses the persistent NVM slots KEY_1–KEY_4 via the full M1M2M3 protocol.
+</div>
+
+<!-- ============================================================ -->
+<h2>3 · SHE key ID map — ICUSE Table 4.1 vs. driver header</h2>
+<table>
+  <tr><th>Key</th><th>KEYMD</th><th>KEY_ID</th><th>Driver macro (Cry_30_Rh850Icus_Types.h)</th></tr>
+  <tr><td><code>SECRET_KEY</code> (device-unique ROM key)</td><td>0</td><td><code>0x00</code></td><td><code>CRY_KEYID_RAW_SECRET_KEY</code></td></tr>
+  <tr><td><code>MASTER_ECU_KEY</code></td><td>0</td><td><code>0x01</code></td><td><code>CRY_KEYID_RAW_MASTER_ECU_KEY</code></td></tr>
+  <tr><td><code>BOOT_MAC_KEY</code></td><td>0</td><td><code>0x02</code></td><td><code>CRY_KEYID_RAW_BOOT_MAC_KEY</code></td></tr>
+  <tr><td><code>BOOT_MAC</code></td><td>0</td><td><code>0x03</code></td><td><code>CRY_KEYID_RAW_BOOT_MAC</code></td></tr>
+  <tr><td><code>KEY_1</code> … <code>KEY_10</code></td><td>0</td><td><code>0x04</code> … <code>0x0D</code></td><td><code>CRY_KEYID_RAW_KEY_1</code> … <code>_KEY_10</code></td></tr>
+  <tr><td><code>RAM_KEY</code></td><td>0</td><td><code>0x0E</code></td><td><code>CRY_KEYID_RAW_KEY_RAM</code></td></tr>
+  <tr><td><code>KEY_11</code> … <code>KEY_20</code> (extended)</td><td>1</td><td><code>0x04</code> … <code>0x0D</code> again</td><td><code>CRY_KEYID_RAW_KEY_11</code> … <code>_KEY_20</code></td></tr>
+</table>
+<p><strong>KEYMD</strong> is bit 20 of the ICUS0ICRCMD register — it selects the extended key page (KEY_11–20 reuse IDs 0x04–0x0D). The Vector driver masks it as <code>CRY_30_RH850ICUS_CMD_KEYMD_MASK</code> (Cry_30_Rh850Icus_Hw.h:109). <span class="cite">[Manual §4.2, Table 4.1, p. 40]</span></p>
+
+<!-- ============================================================ -->
+<h2>4 · KEY_FLAG bits (manual Table 4.2 = code defines)</h2>
+<table>
+  <tr><th>Bit</th><th>Code (crypto_library_type.h:67–76)</th><th>Manual name</th><th>Effect</th></tr>
+  <tr><td>0x80</td><td><code>WP</code></td><td>WRITE_PROTECTION</td><td>Key can never be rewritten or erased — one-way latch, cannot be cleared.</td></tr>
+  <tr><td>0x40</td><td><code>BP</code></td><td>BOOT_PROTECTION</td><td>Key unusable unless secure boot passed (BOOT_OK/BOOT_FINISHED in ICUS0ICRSTS).</td></tr>
+  <tr><td>0x20</td><td><code>DBGP</code></td><td>DEBUGGER_PROTECTION (DP)</td><td>Key unusable while a debugger is attached (EXT_DEBUGGER status bit).</td></tr>
+  <tr><td>0x10</td><td><code>KU</code></td><td>KEY_USAGE</td><td>1 = CMAC generate/verify only; 0 = AES encrypt/decrypt only.</td></tr>
+  <tr><td>0x08</td><td><code>DWC</code></td><td>DISABLE_WILDCARD</td><td>1 = wildcard UID (all-zero) no longer accepted for key update.</td></tr>
+  <tr><td>0x04</td><td><code>VO</code></td><td>CMAC_USAGE (CU)</td><td>1 = may only <em>verify</em> CMACs, not generate them.</td></tr>
+</table>
+<p>All six project keys are loaded with <code>KU | WP</code> (secure_boot.c:365,442): MAC-only use, frozen after first provisioning.</p>
+
+<!-- ============================================================ -->
+<h2>5 · The key update message M1–M5 (manual §4.4, Figure 4.1)</h2>
+<pre><code>M1 (128 b) = UID(120) | ID(4) | AuthID(4)
+M2 (256 b) = ENC_CBC,K1,IV=0 ( Counter(28) | KEY_FLAG(6) | "0…"94 | KEYID(128) )
+M3 (128 b) = CMAC_K2 ( M1 | M2 )
+M4 (256 b) = UID | ID | AuthID | ENC_ECB,K3 ( Counter | 1 | "0…"99 )
+M5 (128 b) = CMAC_K4 ( M4 )
+
+K1 = KDF(KEY_AuthID, KEY_UPDATE_ENC_C)     K3 = KDF(KEYID, KEY_UPDATE_ENC_C)
+K2 = KDF(KEY_AuthID, KEY_UPDATE_MAC_C)     K4 = KDF(KEYID, KEY_UPDATE_MAC_C)
+
+KEY_UPDATE_ENC_C = 01015348 45008000 00000000 000000B0h
+KEY_UPDATE_MAC_C = 01025348 45008000 00000000 000000B0h
+(extended keys KEY_11–20 use 0181…/0182… constants)</code></pre>
+<ul>
+  <li><strong>M1–M3 carry the registration</strong>; <strong>M4–M5 are the ICUSE's read-back proof</strong> that the key landed correctly.</li>
+  <li><strong>Self-authenticated first load:</strong> when <code>AuthID == ID</code> and the auth key slot is unregistered, KEY_AuthID is treated as <code>0…0</code>₁₂₈ — that is how this project provisions empty slots (secure_boot.c passes <code>authKeyId = keyId</code>, <code>authKey = 0</code>). <span class="cite">[Manual §4.4, p. 43]</span></li>
+  <li><strong>Counter</strong> is a monotonic 28-bit anti-replay value; must be ≥ 1 on first registration (project uses 1), 0 only for RAM_KEY.</li>
+  <li><strong>UID wildcard</strong> = 120 zero bits; allowed only while the target key's DWC flag is 0.</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2>6 · Code path quick map</h2>
+<table>
+  <tr><th>Step</th><th>Function / file</th><th>Role</th></tr>
+  <tr><td>1</td><td><code>SecLib_RandomGenerate</code> · crypto_library.c</td><td>TRNG generates the 16-byte key on-target</td></tr>
+  <tr><td>2</td><td><code>SecLib_KeyRAMUpdate</code> · crypto_library.c:397</td><td>Stages plaintext into RAM_KEY via <code>Cry_30_Rh850Icus_KeyExtract</code> (64-byte plain form → CMD_LOAD_PLAIN_KEY)</td></tr>
+  <tr><td>3</td><td><code>SecLib_GenerateM1M2M3</code> · key_manager.c:99</td><td>Builds M1|M2|M3 with KDF keys K1–K3</td></tr>
+  <tr><td>4</td><td><code>SecLib_KeySHEUpdate</code> · crypto_library.c:456</td><td>Passes M1M2M3 to driver KeyExtract (65-byte form), keyId in <code>symKey.data[0]</code></td></tr>
+  <tr><td>5</td><td><code>Cry_30_Rh850Icus_KeyExtract.c</code> (KeyUpdate=64, WithKeyID=65)</td><td>Parses ID/AuthID from M1 byte 15, derives K4 from KEYID, returns M4M5</td></tr>
+  <tr><td>6</td><td><code>Cry_30_Rh850Icus_Hw.c:1100</code></td><td><code>SendCommand(CMD_LOAD_KEY, keyId, keyIdType)</code> — writes the memory slot</td></tr>
+  <tr><td>7</td><td><code>SecSB_CreateKey</code> tail · secure_boot.c:463–480</td><td>MAC generate + verify round-trip proves the slot is live</td></tr>
+</table>
+
+<h2>7 · Error signals worth memorising</h2>
+<table>
+  <tr><th>Signal</th><th>Meaning</th></tr>
+  <tr><td><code>ERC_KEY_EMPTY</code> (bit 0x008 of ICUS error reg)</td><td>Slot was never registered — the exact state <code>SecSB_VerifySecureBoot</code> reports as <code>E_VC_SECBOOT_ICUS_KEY_EMPTY</code> before provisioning.</td></tr>
+  <tr><td><code>ERC_KEY_WRITE_PROTECTED</code> (ERR5)</td><td>Slot has WP set — re-provisioning attempt rejected. The enable path treats this as "already done", not as failure (secure_boot.c:142).</td></tr>
+  <tr><td><code>ERC_KEY_UPDATE_ERROR</code> (ERR6)</td><td>M1M2M3 rejected: CMAC failed, counter not monotonic, UID mismatch, or flags violated.</td></tr>
+  <tr><td><code>ERC_KEY_NOT_AVAILABLE</code> / <code>ERC_MEMORY_FAILURE</code></td><td>Referenced slot does not exist / ICUSE memory self-test failed.</td></tr>
+</table>
+<p class="cite">Code mapping: <code>SecLib_CheckICUSError()</code> → <code>E_VC_SECBOOT_ICUS_*</code> enums, crypto_library_type.h:166–176. [Manual §5.10, ICUS0ICRSTS/ERR register sections]</p>
+
+<!-- ============================================================ -->
+<h2>8 · Glossary</h2>
+<dl>
+  <dt><strong>ICUSE</strong></dt><dd>ICU Security unit — the RH850 on-chip SHE-class security module performing AES128/CMAC/TRNG and secure boot.</dd>
+  <dt><strong>ICU region</strong></dt><dd>Part of the data flash reserved by ICUSE for key slots and their flags/counters; externally unreadable.</dd>
+  <dt><strong>Memory slot</strong></dt><dd>One key storage area in the ICU region (NVM keys) — addressed by KEY_ID.</dd>
+  <dt><strong>KEY_ID</strong></dt><dd>4-bit selector of a key slot (Table 4.1); appears in M1, in ICUS0ICRCMD[19:16], and in driver macros.</dd>
+  <dt><strong>KEYMD</strong></dt><dd>Bit 20 of ICUS0ICRCMD; selects the extended key page (KEY_11–20).</dd>
+  <dt><strong>KEY_FLAG</strong></dt><dd>6-bit attribute set stored with the key at registration: WP, BP, DP, KU, DWC, CU/VO.</dd>
+  <dt><strong>AuthID</strong></dt><dd>KEY_ID of the key that authenticates the update of another key; equals ID for self-authenticated first loads.</dd>
+  <dt><strong>UID</strong></dt><dd>120-bit device identifier read via CMD_GET_ID; all-zero value = wildcard (if DWC=0).</dd>
+  <dt><strong>Counter (CID)</strong></dt><dd>28-bit monotonic anti-replay counter stored with the key; updates require a strictly greater value.</dd>
+  <dt><strong>M1–M5</strong></dt><dd>SHE key-update messages: M1 (UID|ID|AuthID), M2 (encrypted key+flags+counter), M3 (authenticating CMAC), M4/M5 (ICUSE's verification proof).</dd>
+  <dt><strong>K1–K4</strong></dt><dd>Session keys derived via SHE KDF from the auth key (K1,K2) and the new key (K3,K4) with the KEY_UPDATE_*_C constants.</dd>
+  <dt><strong>CMD_LOAD_KEY</strong></dt><dd>ICUSE command 0008h — register/update an NVM key (or RAM_KEY) from M1–M3.</dd>
+  <dt><strong>CMD_LOAD_PLAIN_KEY</strong></dt><dd>ICUSE command registering a plaintext key into RAM_KEY (no M1M2M3 protection).</dd>
+  <dt><strong>CMD_EXPORT_RAM_KEY</strong></dt><dd>Exports RAM_KEY encrypted under SECRET_KEY for later re-import via CMD_LOAD_KEY.</dd>
+  <dt><strong>RAM_KEY</strong></dt><dd>Single volatile key in ICUSE-internal RAM; no KEY_FLAG, no counter; survives only until reset unless exported.</dd>
+  <dt><strong>TRNG</strong></dt><dd>True random number generator inside ICUSE; source of all key material in this project.</dd>
+  <dt><strong>WP / one-way latch</strong></dt><dd>Once WRITE_PROTECTION is set at registration, the slot is immutable until the next full chip erase.</dd>
+</dl>
+
+<footer>
+  Sources: RH850/F1KM ICUSE User Manual R01UH0703EJ0100 Rev.1.00 (§4.1–4.4, §5.6.7, §5.10) · Vector Cry_30_Rh850Icus / Crypto_30_CryWrapper implementation · project <code>security/</code> stack.<br>
+  Companion lesson: <a href="../lessons/0001-icuse-key-slots.html">0001 — Where do SECUREBOOT_KEY and DATASTORE_KEY actually live?</a>
+</footer>
+</main>
+</body>
+</html>

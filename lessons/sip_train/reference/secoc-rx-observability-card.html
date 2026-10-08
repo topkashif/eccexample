@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SecOC RX Observability Card</title><link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<div class="kicker">Reference card · RX verification</div>
+<h1>Prove RX SecOC without an application ACK</h1>
+<h2>Pipeline</h2>
+<pre>CANoe 8-byte frame
+ → PduR Path A
+ → SecOC_RxIndication
+ → SecOC_RxIf_RxIndication
+ → SecOC_MainFunctionRx / SecOC_Verify_MAC
+ → Csm_MacVerify
+ → Cry callback
+ → SecOC_RxCsmCallback, if async
+ → PduR_SecOCRxIndication
+ → COM/application, 5 bytes</pre>
+<h2>Breakpoints</h2>
+<table><thead><tr><th>Function</th><th>Expected evidence</th></tr></thead><tbody>
+<tr><td><code>SecOC_RxIndication</code></td><td><code>SduLength = 8</code>; if uninit branch fires, prove init set TRUE and no later clear</td></tr>
+<tr><td><code>SecOC_RxIf_RxIndication</code></td><td>normal PDU copied; MAC cached</td></tr>
+<tr><td><code>SecOC_MainFunctionRxInternal</code></td><td>deferred RX processing is scheduled</td></tr>
+<tr><td><code>SecOC_Verify_MAC</code></td><td>verification state machine starts</td></tr>
+<tr><td><code>SecOC_VerifyProcessing_MACUsingCSM43</code></td><td>Data ID/authentic data/MAC/24-bit length sent to CSM</td></tr>
+<tr><td><code>Csm_MacVerify</code></td><td>generated authentication-layer job is requested</td></tr>
+<tr><td><code>SecOC_RxCsmCallback</code></td><td>async CSM result returns to SecOC</td></tr>
+<tr><td><code>PduR_SecOCRxIndication</code></td><td>verified Authentic PDU forwarded, length 5</td></tr>
+</tbody></table>
+<h2>Expected input</h2>
+<pre>Data ID       = 02 02
+AuthenticPDU = CAN[0] CAN[1] CAN[2] 00 00
+CMAC input    = 02 02 || AuthenticPDU
+received MAC  = CAN[5] CAN[6] CAN[7]
+MAC length    = 24 bits</pre>
+<h2>Invalid-frame evidence</h2>
+<pre>bad payload/padding/MAC
+ → Csm_MacVerify
+ → verification != OK
+ → ProcessUnsuccessfulVerificationResult
+ → no normal PduR_SecOCRxIndication to COM</pre>
+<h2>Do not confuse</h2>
+<ul><li>CAN controller ACK ≠ SecOC verification success.</li><li>Status propagation <code>NONE</code> ≠ verification disabled.</li><li>Five-byte Authentic PDU ≠ eight-byte secured CAN frame.</li><li>CSM request accepted (<code>E_OK</code>) ≠ MAC verification result is OK; inspect the result pointer/callback.</li></ul>
+<div class="callout caution"><strong>Check bypasses:</strong> development mode off, ignore-verification off, verification override cancelled.</div>
+<p><a href="../lessons/0010-rx-secoc-observability-without-ack.html">Lesson 10</a> · <a href="../research/secoc-rx-observability-checklist.md">Detailed checklist</a></p>
+</main></body></html>ասdf"}.split(

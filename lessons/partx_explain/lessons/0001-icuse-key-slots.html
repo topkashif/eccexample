@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0001 — Where do SECUREBOOT_KEY and DATASTORE_KEY actually live?</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+
+<p class="kicker">Lesson 0001 · ICUSE Key Provisioning · ~10 minutes</p>
+<h1>Where do <code>SECUREBOOT_KEY</code> and <code>DATASTORE_KEY</code> actually live?</h1>
+
+<!-- ============================================================ -->
+<h2>The one-sentence answer</h2>
+<p>They don't exist in the hardware at all — they are <strong>compile-time aliases</strong> defined in <code>crypto_library_type.h</code> that resolve to generic SHE slots (<code>KEY_1</code>…<code>KEY_4</code>), which the Vector driver provisions into ICUSE memory slots in the data flash via the standard SHE <em>M1|M2|M3</em> key-update protocol.</p>
+
+<h2>1 · Follow one name through four layers</h2>
+<div class="path">
+  <div class="stage"><span class="who">Your application · crypto_library_type.h:224</span>
+    <code>#define SECUREBOOT_KEY KEY_1</code> — a project-facing <em>role</em>, not a key.</div>
+  <div class="arrow">↓</div>
+  <div class="stage"><span class="who">SHE slot enum · crypto_library_type.h:103</span>
+    <code>KEY_1 = CRY_KEYID_RAW_KEY_1</code> — generic SHE slot vocabulary shared with the driver.</div>
+  <div class="arrow">↓</div>
+  <div class="stage"><span class="who">Raw wire ID · Cry_30_Rh850Icus_Types.h:71</span>
+    <code>CRY_KEYID_RAW_KEY_1 = 0x04</code> — the value that lands in M1 byte 15 and in the ICUS command register.</div>
+  <div class="arrow">↓</div>
+  <div class="stage hw"><span class="who">Hardware · ICUSE manual §4.1.2, Table 4.1 (p. 38–40)</span>
+    A <strong>memory slot</strong> in the ICU region of the data flash — externally unreadable, flagged, counter-protected.</div>
+</div>
+<p>By default: <code>SECUREBOOT_KEY→KEY_1</code>, <code>JTAG_KEY→KEY_2</code>, <code>DATASTORE_KEY→KEY_3</code>, <code>INTEGRITY_KEY→KEY_4</code>. If <code>KEYRAM_AS_KEY</code> is defined, all four collapse onto the volatile <code>RAM_KEY</code> instead <span class="cite">[crypto_library_type.h:214–228]</span>.</p>
+
+<!-- ============================================================ -->
+<h2>2 · How the key value gets into the slot</h2>
+<p>There is no factory-injected key here and no key arrives over a bus. <code>SecSB_EnableSecurity</code> (secure_boot.c:127) manufactures each key on-target:</p>
+<p><strong>Step 1 — generate.</strong> The ICUSE TRNG produces 16 random bytes; they are staged into the volatile RAM_KEY as a plaintext key <span class="cite">[<code>SecSB_GenerateRamKey</code> → <code>SecLib_KeyRAMUpdate</code>, crypto_library.c:397; manual §4.1.3]</span>.</p>
+<p><strong>Step 2 — wrap in the SHE update protocol.</strong> <code>SecLib_GenerateM1M2M3</code> (key_manager.c:99) builds the three-part message of manual §4.4: M1 = <em>UID | ID | AuthID</em>, M2 = the new key value, its KEY_FLAG (<code>KU|WP</code>) and counter=1, AES-CBC-encrypted under K1; M3 = a CMAC over M1|M2 under K2. K1–K2 are derived from the authenticating key's material via the SHE KDF <span class="cite">[manual §4.4, p. 44]</span>.</p>
+<p><strong>Step 3 — deliver to hardware.</strong> <code>SecLib_KeySHEUpdate</code> (crypto_library.c:456) hands the 64-byte M1M2M3 to <code>Cry_30_Rh850Icus_KeyExtract</code>, which parses ID/AuthID out of M1 byte 15 and finally issues <code>CMD_LOAD_KEY</code> with the slot number <span class="cite">[Cry_30_Rh850Icus_Hw.c:1100; manual §5.6.7]</span>. Inside ICUSE, the message is decrypted and verified, and the slot is written with key + flags + counter.</p>
+<p><strong>Step 4 — prove it.</strong> <code>SecSB_CreateKey</code> immediately runs a CMAC generate-and-verify round-trip with the new slot (secure_boot.c:463–480). Success = the slot is live. Because the flags included <strong>WP</strong>, it is now frozen — which is why re-running enable-security later surfaces <code>E_VC_SECBOOT_ICUS_KEY_WRITE_PROTECTED</code> and the code treats that as "already enabled" rather than an error (secure_boot.c:142).</p>
+
+<div class="callout hw">
+  <span class="title">The chicken-and-egg, resolved</span>
+  How can M3 be authenticated by a key that doesn't exist yet? Because the project loads each slot with <code>authKeyId = keyId</code> and an all-zero auth key. The manual sanctions exactly this: an unregistered AuthID equal to ID makes KEY_AuthID behave as <code>0…0</code>₁₂₈ <span class="cite">[§4.4, p. 43]</span>. Everything is self-authenticated on first load and TRNG-born — nothing secret ever crosses the wire in plaintext except into RAM_KEY.
+</div>
+
+<!-- ============================================================ -->
+<h2>3 · Knowledge check</h2>
+<div class="quiz" id="qz">
+  <fieldset data-answer="1">
+    <legend>Q1 · NVM key slots physically reside in which area?</legend>
+    <button type="button">code flash boot region</button>
+    <button type="button">data flash ICU region</button>
+    <button type="button">internal RAM key store</button>
+    <button type="button">external SPI flash memory</button>
+    <div class="explain">Manual §4.1.2: ICUSE uses part of the <strong>data flash</strong> (the ICU region) for key memory slots; the RAM key is the only volatile one.</div>
+  </fieldset>
+  <fieldset data-answer="0">
+    <legend>Q2 · Which raw KEY_ID does SECUREBOOT_KEY carry on the wire by default?</legend>
+    <button type="button">raw key identifier 0x04</button>
+    <button type="button">raw key identifier 0x01</button>
+    <button type="button">raw key identifier 0x0E</button>
+    <button type="button">raw key identifier 0x06</button>
+    <div class="explain">SECUREBOOT_KEY → KEY_1 → CRY_KEYID_RAW_KEY_1 = 0x04 (crypto_library_type.h:224, Cry_30_Rh850Icus_Types.h:71). 0x01 is MASTER_ECU_KEY, 0x0E is RAM_KEY, 0x06 is KEY_3 (DATASTORE_KEY).</div>
+  </fieldset>
+  <fieldset data-answer="2">
+    <legend>Q3 · Which KEY_FLAG combination is applied when provisioning these keys?</legend>
+    <button type="button">key usage and boot protection</button>
+    <button type="button">boot protection and debugger protection</button>
+    <button type="button">key usage and write protection</button>
+    <button type="button">disable wildcard and verify only</button>
+    <div class="explain">secure_boot.c:365,442 — <code>keyFlags = KU | WP</code>: CMAC-capable and permanently frozen after the first load.</div>
+  </fieldset>
+  <fieldset data-answer="3">
+    <legend>Q4 · What protects the key value travelling inside message M2?</legend>
+    <button type="button">CMAC with derived key K2</button>
+    <button type="button">AES ECB with derived key K3</button>
+    <button type="button">AES ECB with derived key K1</button>
+    <button type="button">AES CBC with derived key K1</button>
+    <div class="explain">M2 = ENC<sub>CBC,K1,IV=0</sub>(Counter | KEY_FLAG | zeros | KEYID) — manual §4.4, p. 44. K2's CMAC covers M3, K3's ECB encrypts M4.</div>
+  </fieldset>
+</div>
+
+<!-- ============================================================ -->
+<h2>4 · Read next / practice</h2>
+<div class="callout">
+  <span class="title">Primary source</span>
+  ICUSE User Manual (docs/rh850_f1km_icuse_usermanual.pdf), <strong>Section 4.4 "How to Register Keys", pages 43–45</strong> — the normative description of M1–M5, the KDF constants, and which AuthID may register which key. Read it once with the key-slot map open.
+</div>
+<ul>
+  <li>Keep <a href="../reference/key-slot-map.html">the Key Slot Map &amp; Glossary</a> open as you re-read <code>SecSB_EnableSecurity</code> top-to-bottom; every name on the map appears in that function.</li>
+  <li>Then trace, on paper: what KEY_ID, flags and counter <code>SecSB_CreateKey(DATASTORE_KEY, CMAC_KEY)</code> puts into its M1M2M3.</li>
+</ul>
+
+<div class="callout">
+  <span class="title">Your teacher</span>
+  Anything unclear — the M1/M2 bit layout, the KDF, why WP is safe, the <code>KEYRAM_AS_KEY</code> trade-off — just ask in the chat. Follow-up questions are the fastest way to lock this in.
+</div>
+
+<footer>
+  Citations: RH850/F1KM ICUSE User Manual R01UH0703EJ0100 Rev.1.00 §4.1–4.4, §5.6.7 · project <code>security/</code> sources · Vector Cry_30_Rh850Icus driver.<br>
+  Course: <a href="../reference/key-slot-map.html">reference — key slot map &amp; glossary</a> · next lesson queued: the verification path &amp; BOOT_MAC.
+</footer>
+
+<script>
+(function () {
+  var boxes = document.querySelectorAll('#qz fieldset');
+  boxes.forEach(function (box) {
+    var buttons = box.querySelectorAll('button');
+    var explain = box.querySelector('.explain');
+    var answer = parseInt(box.getAttribute('data-answer'), 10);
+    buttons.forEach(function (btn, i) {
+      btn.addEventListener('click', function () {
+        buttons.forEach(function (b) { b.classList.remove('correct', 'wrong'); });
+        if (i === answer) { btn.classList.add('correct'); }
+        else {
+          btn.classList.add('wrong');
+          buttons[answer].classList.add('correct');
+        }
+        explain.classList.add('show');
+      });
+    });
+  });
+})();
+</script>
+</main>
+</body>
+</html>

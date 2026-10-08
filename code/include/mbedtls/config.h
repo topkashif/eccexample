@@ -3306,7 +3306,7 @@
 
 /* ECP options: P-224 only, ROM-tight configuration for RH850 target */
 #define MBEDTLS_ECP_MAX_BITS             224 /**< Maximum bit size of groups: secp224r1 (CS.00172) */
-#define MBEDTLS_ECP_WINDOW_SIZE            3 /**< Max window size: smaller table (8*P-224 ~ 1.4KB RAM) for runtime keygen */
+#define MBEDTLS_ECP_WINDOW_SIZE            3 /**< Comb window for P-224; measure allocator high-water use on target */
 #define MBEDTLS_ECP_FIXED_POINT_OPTIM      0 /**< No comb tables: negotiated keys are ephemeral, no perf gain */
 
 /*

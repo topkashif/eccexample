@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SecOC Generated Boundary Checklist</title><link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<div class="kicker">Reference card · build integration</div>
+<h1>SecOC generated-boundary checklist</h1>
+<p class="lede">Copy the generated boundary, not just the vendor source. Use this list before hand-defining any missing identifier.</p>
+<h2>Must obtain from matching DaVinci output</h2>
+<table><thead><tr><th>Artifact</th><th>Why it matters</th></tr></thead><tbody>
+<tr><td><code>SecOC_Lcfg.h</code></td><td>Declares generated configuration types, accessors, and tables included by <code>SecOC.h</code>.</td></tr>
+<tr><td><code>SecOC_Lcfg.c</code></td><td>Defines generated link-time configuration/data.</td></tr>
+<tr><td><code>SecOC_PBcfg.c</code></td><td>Needed when the selected configuration variant uses post-build data.</td></tr>
+<tr><td><code>SecOC_Cfg_*.h</code></td><td>Selects feature branches and supplies generated per-unit symbols.</td></tr>
+<tr><td><code>SecOC_MemMap.h</code></td><td>Maps SecOC code/data section markers for the project compiler/linker.</td></tr>
+<tr><td><code>SecOC_Cbk.h</code></td><td>Generated/configured callback declarations expected by the component.</td></tr>
+<tr><td><code>SecOC_Cot.h</code></td><td>Configured callout/type declarations used by the source.</td></tr>
+<tr><td><code>SecOC_rules_generated.mak</code></td><td>Generated source/include/build integration; explicitly included by the local make rules.</td></tr>
+</tbody></table>
+<h2>Project-owned boundaries</h2>
+<pre>SchM_SecOC.h       exclusive-area macros
+PduR_SecOC.h       PduR callbacks/APIs
+Csm.h              MAC verify service
+Det.h              development/runtime error reporting
+IdsM.h             security-event reporting, if enabled
+EcuM_Error.h       init error hook, if enabled
+Rte_SecOC_Type.h   RTE-visible SecOC types, if RTE service is enabled</pre>
+<h2>Local SecOC SchM names</h2>
+<pre>SchM_Enter_SecOC_SECOC_EXCLUSIVE_AREA_RXSTATE()
+SchM_Exit_SecOC_SECOC_EXCLUSIVE_AREA_RXSTATE()
+SchM_Enter_SecOC_SECOC_EXCLUSIVE_AREA_TXSTATE()
+SchM_Exit_SecOC_SECOC_EXCLUSIVE_AREA_TXSTATE()</pre>
+<h2>Verification result values</h2>
+<pre>SUCCESS              0x00u
+FAILURE              0x01u
+FRESHNESSFAILURE     0x02u
+AUTHENTICATIONBUILDFAILURE 0x03u
+NO_VERIFICATION      0x04u
+FAILURE_OVERWRITTEN  0x05u</pre>
+<p>These correspond to <code>SECOC_VERIFICATIONSUCCESS</code>, <code>SECOC_VERIFICATIONFAILURE</code>, <code>SECOC_FRESHNESSFAILURE</code>, <code>SECOC_AUTHENTICATIONBUILDFAILURE</code>, <code>SECOC_NO_VERIFICATION</code>, and <code>SECOC_VERIFICATIONFAILURE_OVERWRITTEN</code>.</p>
+<h2>First HV_BATT RX test</h2>
+<pre>SecOCVerificationStatusPropagationMode = NONE
+SecOCClientServerVerificationStatusPropagationMode = NONE
+SecOCVerificationStatusWithSecuredPduPropagationMode = NONE
+SecOCUseGetRxFreshness = FALSE
+SecOCUseGetRxFreshnessAuthData = FALSE
+SecOCEnableCustomAuthenticationAPI = FALSE
+SecOCSecuredRxPduVerification = TRUE</pre>
+<div class="callout caution"><strong>Never hand-stub:</strong> <code>SecOC_Get...</code> accessors, CSM MAC verification, RX CSM callback, PduR verified handoff, or a guessed RTE callback ABI.</div>
+</main></body></html>

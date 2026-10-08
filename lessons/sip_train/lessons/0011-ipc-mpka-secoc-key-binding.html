@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lesson 11 · IPC MPKA key binding for SecOC</title><link rel="stylesheet" href="../assets/course.css"><script defer src="../assets/retrieval-check.js"></script></head><body><main>
+<div class="kicker">Lesson 11 · IPC integration · vKeyM_MPKA + SecOC + RH850/ICUS</div>
+<h1>Make the final key do the job</h1>
+<p class="lede">Your tangible win: configure the IPC/EVCU two-member MPKA relationship and trace exactly how the committed message-group key reaches SecOC MAC verification.</p>
+<div class="callout caution"><strong>First, the boundary.</strong> The supplied vKeyM_MPKA orchestration is present, but the inspected CryptoWrapper key-exchange and KDF leaf functions return <code>E_NOT_OK</code>. This lesson teaches the correct integration contract; it does not claim the current ICUS-only delivery can complete MPKA on target.</div>
+<h2>1 · Freeze the IPC group</h2><table><tr><th>Setting</th><th>IPC value</th></tr><tr><td>key-negotiation group ID</td><td><code>2</code></td></tr><tr><td>IPC local member ID</td><td><code>3</code></td></tr><tr><td>EVCU remote member ID</td><td><code>4</code></td></tr><tr><td>present members</td><td>IPC + EVCU = 2 → ECDH</td></tr><tr><td>message group ID</td><td><code>2</code>, only if the approved mapping says MGRP.ID is MPKA CddMsgGrpId</td></tr></table><p>In the installed BSWMD, use <code>CddKeyNegotiationGroup</code>, one remote-member entry for EVCU, and one <code>CddMessageGroup</code>. The local IPC member is implicit. The delivered source packs the member ID into seven wire bits; IDs 3 and 4 are compatible with that observed format.</p>
+<h2>2 · Predict before looking</h2><p>Which key should the SecOC MAC job reference: the exchange key, the temporary key, or the committed message-group key?</p><div class="card" data-retrieval data-answer="CddMsgGrpKey" data-correct="Correct. SecOC uses the committed final message-group key." data-retry="Follow the lifecycle: exchange → derive temporary → group confirmation → commit final. SecOC uses the committed final key."><label for="answer1">Enter the configured key role</label> <input id="answer1" autocomplete="off"><button type="button">Check</button><p role="status" aria-live="polite"></p></div>
+<h2>3 · The four-key graph</h2><pre>CddKeyNegotiationGroupKeyRef → KEX_Group_2
+CddMsgGrpKDFInputKey         → KDF_Input_2
+CddMsgGrpTmpKey              → MAC_Temporary_2
+CddMsgGrpKey                 → MAC_Final_2
+
+ECDH shared value
+  → KDF_Input_2.PASSWORD
+  → KDF_Input_2.SALT = {0x02}
+  → X9.63-SHA256 KDF
+  → MAC_Temporary_2 (16 bytes)
+  → group confirmation
+  → MAC_Final_2
+  → SecOC CsmJobKeyRef</pre><p>The one-byte salt is the MPKA message-group ID. It is not automatically the full two-byte SecOC Data ID, and it must not be duplicated in the SecOC CMAC input.</p>
+<h2>4 · What the generated SecOC call means</h2><pre>Csm_MacVerify(
+  authenticationLayerId,  // generated CSM job ID
+  SINGLECALL,
+  dataToAuthenticate,
+  dataLength,
+  receivedMac,
+  24,                     // bits
+  verifyResultPtr);</pre><p>The job ID is resolved by generated CSM configuration. Its <code>CsmJobKeyRef</code> must point to <code>MAC_Final_2</code>. It must not be reinterpreted as an ICUS key ID or replaced with a boot-key constant.</p>
+<h2>5 · If reusing SecurityLib</h2><p>The local <code>secoc_securitylib_csm_wrapper.c</code> is a narrow adapter. Keep generated <code>Csm.c</code> and route only the generated SecOC job IDs to the adapter through an approved project dispatch point.</p><pre>startup:
+  SecOcSecurityLib_ConfigureMessageGroup(generated handles)
+
+successful vKeyM_MPKA_KeyNegotiationFinalized(2, SUCCESSFUL):
+  Csm_KeyElementGet(MAC_Final_2, CRYPTO_KE_MAC_KEY)
+  require 16 bytes
+  SecLib_KeyRAMUpdate(key, 16)
+  activate
+
+SecOC verification:
+  job ID matches configured RX job
+  SecLib_MACVerify(KEY_RAM, data, 7, mac, 3)
+  mismatch → E_OK + CSM_E_VER_NOT_OK
+  service failure → E_NOT_OK</pre><p>Do not add another global <code>Csm_MacVerify()</code>. The generated CSM already fills a job object and dispatches it through <code>Csm_ProcessJob</code>; duplicate definitions can recurse, collide at link time, or bypass the configured primitive/key chain.</p>
+<div class="card" data-retrieval data-answer="24" data-correct="Correct: Csm_MacVerify receives the MAC length in bits. The transmitted MAC is 3 bytes." data-retry="The transmitted Profile 2 MAC is 3 bytes, but the CSM verification API receives its length in bits. Enter 24."><label for="answer2">What macLength reaches Csm_MacVerify?</label> <input id="answer2" inputmode="numeric" autocomplete="off"><button type="button">Check</button><p role="status" aria-live="polite"></p></div>
+<h2>6 · Verify on the target</h2><ol><li>Inspect generated symbolic handles: <code>MAC_Final_2</code>, RX verify job, and optional TX generation job.</li><li>Confirm the RX job points to <code>MAC_Final_2</code>.</li><li>Breakpoint at <code>SecOC_VerifyProcessing_MACUsingCSM43()</code>; inspect Data ID, authentic data, data length, MAC pointer, and 24-bit length.</li><li>On successful finalization, prove the adapter activates only after final-key read/length/load succeeds.</li><li>Send a valid frame, then mutate payload, authenticated padding, MAC, Data ID, and key activation state.</li><li>Only a valid frame may reach <code>PduR_SecOCRxIndication</code>. Do not log secret key bytes.</li></ol>
+<h2>Primary reading</h2><p><a href="../research/ipc-mpka-secoc-securitylib-mapping.md">IPC source map</a> · <a href="../reference/ipc-mpka-secoc-key-binding.html">printable reference card</a> · <a href="../components/vKeyM_MPKA/Implementation/vKeyM_MPKA_CryptoStateMachine.c">MPKA crypto state machine</a> · <a href="../components/Csm/Implementation/Csm.h">CSM API contract</a> · <a href="../components/SecOC/Implementation/SecOC_VerifyProcessing.c">SecOC verification call site</a></p>
+<div class="callout">Ask me follow-up questions. For exact generated values, provide the generated <code>Csm_Cfg.h</code>/<code>Csm_Lcfg.c</code>, SecOC configuration, and the exact RH850 derivative/ICUS variant—never send production key material.</div>
+</main></body></html>

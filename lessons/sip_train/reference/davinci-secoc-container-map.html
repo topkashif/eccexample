@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DaVinci SecOC Profile 2 container map</title><link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<div class="kicker">Reference · configuration map</div>
+<h1>HV_BATT Profile 2: DaVinci container map</h1>
+<p class="lede">Use this as a configuration checklist. Names are AUTOSAR ECUC names; Vector GUI labels can vary by release.</p>
+<div class="callout"><strong>Contract:</strong> Classical CAN, secured PDU 8 bytes, Authentic PDU 5 bytes, MAC 24 bits in bytes 5–7, <code>SecOCDataId=0x0202</code>, DataToAuthenticator = <code>02 02 || CAN[0..4]</code>, FV lengths 0.</div>
+<h2>Container checklist</h2>
+<table>
+<tr><th>Module</th><th>Container / reference</th><th>Configuration for HV_BATT</th></tr>
+<tr><td>CanIf</td><td><code>CanIfInitCfg/CanIfRxPduCfg</code></td><td>CAN ID, <code>STANDARD_NO_FD_CAN</code> or <code>EXTENDED_NO_FD_CAN</code>, DLC/data length 8, HRH ref, global secured PDU ref, UL <code>PDUR</code>.</td></tr>
+<tr><td>PduR</td><td><code>PduRRoutingPaths/PduRRoutingPath/PduRSrcPdu/PduRDestPdu</code></td><td>Path A: CanIf secured PDU → SecOC secured PDU. Path B: SecOC Authentic PDU → COM/upper PDU. Direct IF routing initially.</td></tr>
+<tr><td>SecOC</td><td><code>SecOCRxPduProcessing</code></td><td><code>SecOCAuthInfoTruncLength=24</code>, <code>SecOCDataId=0x0202</code>, FV complete/truncated lengths 0, auth-data freshness false, verify attempts 0, deferred.</td></tr>
+<tr><td>SecOC</td><td><code>SecOCRxSecuredPduLayer/SecOCRxSecuredPdu</code></td><td>Header length 0, verification TRUE, secured PDU ref, authentication service/job ref.</td></tr>
+<tr><td>SecOC</td><td><code>SecOCRxAuthenticPduLayer</code></td><td>Reference the 5-byte Authentic PDU delivered upward after verification.</td></tr>
+<tr><td>SecOC</td><td><code>SecOCRxPduSecuredArea</code></td><td>Prefer omitted → complete Authentic PDU. If explicit: offset 0, length 5. Never length 3.</td></tr>
+<tr><td>SecOC</td><td><code>SecOCMainFunctionRx</code></td><td>Period and handle ID; assign RX PDU if multiple RX main functions exist.</td></tr>
+<tr><td>CSM</td><td><code>CsmJobs/CsmJob</code></td><td>Job ID, primitive ref, key ref, queue ref, sync/async mode, callback if async.</td></tr>
+<tr><td>CSM</td><td><code>CsmPrimitives/CsmMacVerify/CsmMacVerifyConfig</code></td><td>AES, CMAC, secondary family NOT_SET, AES key length 16 bytes. Compare length 24 bits and data max 7 bytes only when the selected interface requires them.</td></tr>
+<tr><td>Crypto / CRY</td><td>Crypto wrapper primitive and RH850 CRY driver object</td><td>MAC verify + CMAC → <code>CryCmacAes128VerConfig</code> → ICUSE. Verify key ID, key element, workspace, init, and sync/async contract in installed driver docs.</td></tr>
+</table>
+<h2>Length sanity check</h2>
+<pre>Physical CAN secured PDU:  8 bytes = Authentic[5] || MAC[3]
+SecOC Authentic PDU:       5 bytes = CAN[0]..CAN[4]
+DataToAuthenticator:       7 bytes = DataId[2] || Authentic[5]
+Received authenticator:     3 bytes = CAN[5]..CAN[7]</pre>
+<h2>Generated-code checkpoints</h2>
+<ul><li>CanIf accepts only the intended Classical CAN frame and length 8.</li><li>PduR has both routes and does not change the payload.</li><li>SecOC references the same secured PDU and authentic PDU as PduR.</li><li>Generated SecOC calls <code>Csm_MacVerify</code> with 7-byte data and 24-bit received MAC.</li><li>CSM job resolves to AES-CMAC verify and the intended key/queue.</li><li>Successful verification alone causes the 5-byte Authentic PDU to be forwarded.</li></ul>
+<p><a href="../lessons/0004-davinci-container-by-container-configuration.html">Read the full lesson</a>.</p>
+</main></body></html>

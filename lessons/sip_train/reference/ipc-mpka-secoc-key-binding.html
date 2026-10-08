@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>IPC MPKA → SecOC key-binding card</title><link rel="stylesheet" href="../assets/course.css"><script defer src="../assets/retrieval-check.js"></script></head><body><main>
+<div class="kicker">Reference card · IPC security integration</div>
+<h1>Bind the MPKA key to SecOC—without confusing jobs, keys, or lengths</h1>
+<p class="lede">IPC uses MPKA key-negotiation group 2 with IPC local ID 3 and EVCU local ID 4. The final message-group key—not the exchange key—must protect SecOC.</p>
+<div class="callout caution"><strong>Evidence boundary.</strong> The supplied vKeyM_MPKA source orchestrates ECDH and X9.63-SHA256 KDF, but the inspected CryptoWrapper key-exchange and KDF hardware hooks return <code>E_NOT_OK</code>. This card defines the correct binding; it does not claim MPKA is target-ready.</div>
+<h2>Identifiers</h2><table><thead><tr><th>Field</th><th>IPC value</th><th>Use</th></tr></thead><tbody>
+<tr><td>MPKA key group ID</td><td><code>2</code></td><td><code>CddKeyNegotiationGroupId</code>, subject to validator/OEM confirmation</td></tr>
+<tr><td>IPC local member ID</td><td><code>3</code></td><td><code>CddKeyNegotiationLocalMemberId</code></td></tr>
+<tr><td>EVCU remote member ID</td><td><code>4</code></td><td>one <code>CddKeyNegotiationRemoteMember</code></td></tr>
+<tr><td>message group ID</td><td><code>2</code> if approved</td><td><code>CddMsgGrpId</code>; one-byte KDF salt</td></tr>
+<tr><td>application M.ID</td><td><code>2</code></td><td>keep separate from MPKA/CSM identifiers unless specified</td></tr>
+</tbody></table>
+<h2>Four key roles</h2><pre>KEX_Group_2      ← CddKeyNegotiationGroupKeyRef
+  ECDH shared value
+KDF_Input_2      ← CddMsgGrpKDFInputKey
+MAC_Temporary_2  ← CddMsgGrpTmpKey
+MAC_Final_2      ← CddMsgGrpKey
+  committed after group confirmation
+  ↓
+SecOC CsmJobKeyRef</pre>
+<p>For two present members, vKeyM_MPKA selects <strong>ECDH</strong>. The local member is implicit; do not add IPC as a remote member. Keep the temporary key separate from the committed final key.</p>
+<h2>CSM binding</h2><pre>SecOC authentication-layer ID
+  → CsmJob
+  → CsmJobKeyRef = MAC_Final_2
+  → AES-CMAC primitive
+  → CryIf / crypto backend</pre><p>The value passed as the first argument of <code>Csm_MacVerify()</code> is a <strong>job ID</strong>, not a key ID. Never hard-code <code>BOOT_MAC_KEY</code> in a generic wrapper.</p>
+<h2>Length card</h2><table><tr><th>Boundary</th><th>Profile 2 value</th></tr><tr><td>MPKA final AES-128 key</td><td><strong>16 bytes</strong></td></tr><tr><td><code>Csm_MacVerify(macLength)</code></td><td><strong>24 bits</strong></td></tr><tr><td>received/generated authenticator</td><td><strong>3 bytes</strong></td></tr><tr><td>legacy <code>SecLib_MACVerify()</code></td><td><strong>3 bytes</strong> in this library</td></tr></table>
+<h2>Adapter lifecycle</h2><pre>Configure generated key/job handles
+  → wait for vKeyM_MPKA_KeyNegotiationFinalized(2, SUCCESSFUL)
+  → Csm_KeyElementGet(CddMsgGrpKey, CRYPTO_KE_MAC_KEY)
+  → require exactly 16 bytes
+  → SecLib_KeyRAMUpdate(key, 16)
+  → activate adapter
+  → route only registered SecOC job IDs</pre><p>Loading into ICUS <code>KEY_RAM</code> copies key material through CPU memory. It requires readable final-key material and an ownership policy for the shared RAM slot. If the key is non-readable/hardware-bound, bind SecOC directly to the CSM/CryIf key instead.</p>
+<h2>Verification input</h2><pre>SecOCDataId       = project-configured two-byte value
+Authentic PDU     = project-configured bytes
+Csm input length   = Data ID + Authentic PDU (+ FV if configured)
+Csm MAC length     = 24 bits</pre><p>For the existing lesson's Profile 2 contract, the expected input is <code>02 02 || 5-byte Authentic PDU</code>, length 7, with no freshness bytes. Reconfirm this for IPC before freezing the adapter constants.</p>
+<div class="card" data-retrieval data-answer="CddMsgGrpKey" data-correct="Correct. SecOC must use the committed final message-group key." data-retry="Recall the lifecycle: exchange key → KDF input → temporary key → committed final key. SecOC uses the last one."><label for="key">Which MPKA key does the SecOC MAC job use?</label> <input id="key" autocomplete="off"><button type="button">Check</button><p role="status" aria-live="polite"></p></div>
+<h2>Do not do this</h2><ul><li>Do not define a second global <code>Csm_MacVerify()</code>; it risks duplicate symbols/recursion and bypasses generated job dispatch.</li><li>Do not replace MPKA ECDH/KDF with SHE M1–M5 or <code>SecLib_CalculateKdfSHE()</code>.</li><li>Do not assume a generated trigger response means the key is committed or usable.</li><li>Do not treat ICUS <code>KEY_RAM</code> loading as persistent protected-slot provisioning.</li><li>Do not treat CSM request <code>E_OK</code> as MAC verification success; inspect <code>verifyPtr</code>.</li></ul>
+<h2>Primary sources</h2><p><a href="../research/ipc-mpka-secoc-securitylib-mapping.md">Detailed local source map</a> · <a href="../lessons/0011-ipc-mpka-secoc-key-binding.html">Short lesson</a> · <a href="../reference/mpka-davinci-configuration.html#keys">MPKA key-object handbook</a> · <a href="../reference/secoc-rx-observability-card.html">SecOC RX evidence card</a></p>
+<p class="small">No production secret values are included. Ask the teacher for help interpreting generated symbolic handles or the exact ICUSE/ICUS configuration.</p>
+</main></body></html>

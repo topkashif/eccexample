@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0006 — DaVinci containers for the MPKA Csm key references</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+<p class="kicker">Lesson 0006 · DaVinci configuration work order · RH850F1K / ICUSE · ~10 minutes</p>
+<h1>Configure Csm, CryIf and Crypto so MPKA's four key references resolve</h1>
+<p><strong>One tangible win:</strong> you can open DaVinci and enter the complete Csm → CryIf → Crypto container chain that turns MPKA's four CDD key references into four working key objects — and know exactly which parts the security folder must implement instead of linking.</p>
+
+<div class="callout"><span class="title">Your mission</span>
+The IPC runs MPKA group 2 (IPC member 3, EVCU member 4 → ECDH, P-224) but does not link Vector's Csm/CryIf runtime. The Csm and CryIf <em>containers are still configured in DaVinci</em>: they make MPKA's references resolvable and generate the ID headers your custom implementation must agree with. The <em>runtime behavior</em> comes from the security folder. This lesson walks the containers bottom-up and names the traps.
+</div>
+
+<h2>1 · The four references, and why containers still matter</h2>
+<p>MPKA's BSWMD requires exactly four Csm key references per SecOC use case:</p>
+<table>
+<tr><th>MPKA parameter</th><th>Role</th><th>Example CsmKey</th></tr>
+<tr><td><code>CddKeyNegotiationGroupKeyRef</code></td><td>negotiation key: private scalar, public points, shared value</td><td><code>CSM_KEX_GROUP_2</code></td></tr>
+<tr><td><code>CddMsgGrpKDFInputKey</code></td><td>X9.63 input: PASSWORD (shared value) + SALT (msg-group ID)</td><td><code>CSM_KDF_INPUT_2</code></td></tr>
+<tr><td><code>CddMsgGrpTmpKey</code></td><td>receives the derived 16-byte AES key</td><td><code>CSM_MAC_TMP_2</code></td></tr>
+<tr><td><code>CddMsgGrpKey</code></td><td>committed key SecOC ultimately consumes</td><td><code>CSM_MAC_FINAL_2</code></td></tr>
+</table>
+<p>Configuring the containers produces three things even with a custom runtime: DaVinci validates the whole reference graph; the generator emits the key/element ID macros (<code>Csm_Cfg.h</code>, <code>Crypto_30_CryWrapper_Cfg.h</code>) that MPKA and your facade compile against; and the ECUC export documents the agreed key model. What you do <em>not</em> get from DaVinci is runtime behavior — one owner per <code>Csm_*</code>/<code>CryIf_*</code> symbol at link time, which is the security folder's implementation.</p>
+
+<h2>2 · The chain DaVinci makes you build</h2>
+<div class="path">
+<div class="stage"><span class="who">MPKA (Cdd module)</span><code>CddKeyNegotiationGroupKeyRef</code>, <code>CddMsgGrpKDFInputKey</code>, <code>CddMsgGrpTmpKey</code>, <code>CddMsgGrpKey</code> → <code>CsmKeys/CsmKey</code></div>
+<div class="arrow">↓ each CsmKey: <code>CsmKeyId</code> + <code>CsmKeyRef</code> → CryIfKey</div>
+<div class="stage"><span class="who">CryIf</span><code>CryIfKey</code>: <code>CryIfKeyId</code> + <code>CryIfKeyRef</code> → CryptoKey; channels map queues → driver objects; the CryptoModule container binds the provider</div>
+<div class="arrow">↓ each CryptoKey: <code>CryptoKeyId</code> + <code>CryptoKeyTypeRef</code> → key type → elements</div>
+<div class="stage hw"><span class="who">Crypto (CryWrapper)</span>key elements with IDs = the <code>CRYPTO_KE_*</code> macros · driver object · provider = SecLib_Ecc/mbedtls ECP + ICUS RNG — software ECDH, not ICUSE ECC</div>
+</div>
+<p>Three different key-ID namespaces (Csm, CryIf, Crypto) plus a fourth (element IDs) — never assume they share numbers.</p>
+
+<h2>3 · The traps, container by container</h2>
+<ol>
+<li><strong>CryptoKeyElement IDs must equal the compiled <code>CRYPTO_KE_*</code> macros.</strong> The wrapper searches elements by ID: PRIVKEY 9, OWNPUBKEY 10, SHAREDVALUE 1, ALGORITHM 12, PASSWORD 1, SALT 13. The custom ECBD elements (PARTNER_PUB_KEY, PARTNER_PUB_KEY_2, INTERMEDIATE, ECU_ID, NUM_ECU) take their IDs from the licensed delivery — MPKA writes them unconditionally in the cancel path, so the key type needs them even for ECDH.</li>
+<li><strong>The SHAREDVALUE element size is not just capacity — it selects the encoding.</strong> 28 bytes → x-only, 56 → x||y, per the wrapper's CalcSecret. It must equal the group's <code>CddKeyNegotiationSharedValueLengthType</code> and EVCU's choice.</li>
+<li><strong><code>CryIfMaxSizeOfKeyElement</code> defaults to 32 — raise it to ≥ 64.</strong> CryIf sizes its internal copy buffers from this parameter; 56-byte public values fail silently at 32.</li>
+<li><strong>Do not configure key-exchange or KDF jobs for MPKA.</strong> Its state machine calls direct key-ID APIs (<code>Csm_KeyExchangeCalcPubVal/CalcSecret</code>, <code>Csm_KeyDerive</code>, element set/copy, <code>Csm_KeyCopy</code>). Jobs exist only where a job-ID client exists: SecOC's <code>Csm_MacGenerate</code>/<code>Csm_MacVerify</code> (AES/CMAC, 7-byte input, 3-byte MAC) routed via a CsmQueue → CryIfChannel → driver object.</li>
+<li><strong>Validity is separate from content.</strong> MPKA pairs every write/copy with <code>Csm_KeySetValid</code>; access flags stay narrow (private/shared/password elements <code>RA_DENIED</code>; final key readable only if the KEY_RAM adapter path is the approved choice).</li>
+</ol>
+<p>Full parameter-by-parameter entry values, the audit checklist, and the build-PC/target validation gates are in the work-order reference below.</p>
+
+<h2>Knowledge check</h2>
+<div class="quiz" data-interactive>
+<fieldset data-answer="3">
+<legend>Which single element-size setting also selects the ECDH shared-value encoding?</legend>
+<button type="button">CsmSymKeyMaxLength in CsmGeneral</button>
+<button type="button">CddKeyNegotiationTimeout in CddGeneral</button>
+<button type="button">CryptoDriverObjectQueueSize of the object</button>
+<button type="button">SHAREDVALUE CryptoKeyElement size</button>
+<div class="explain">The wrapper branches on the configured SHAREDVALUE element length: 28 → x-only, 56 → x||y. It must match CddKeyNegotiationSharedValueLengthType and EVCU.</div>
+</fieldset>
+<fieldset data-answer="0">
+<legend>Why configure Csm/CryIf containers when their runtime is custom?</legend>
+<button type="button">Resolve references and generate shared ID headers</button>
+<button type="button">DaVinci links the Vector runtime automatically</button>
+<button type="button">Containers execute ECDH on the ICUSE engine</button>
+<button type="button">CryIf computes the X9.63 KDF in configuration</button>
+<div class="explain">Containers make MPKA's CDD refs resolvable, validate the graph, and emit the Cfg headers your facade compiles against. Runtime behavior is the security folder's.</div>
+</fieldset>
+<fieldset data-answer="1">
+<legend>Which CryIfGeneral parameter silently breaks 56-byte key-element copies at its default?</legend>
+<button type="button">CryIfMaxNumberOfKeyElements (10)</button>
+<button type="button">CryIfMaxSizeOfKeyElement (32)</button>
+<button type="button">CryIfRedirection (false)</button>
+<button type="button">CryIfSafeBswChecks (true)</button>
+<div class="explain">Internal copy buffers are sized from CryIfMaxSizeOfKeyElement; the default 32 is smaller than a 56-byte public value. Set ≥ 64.</div>
+</fieldset>
+<fieldset data-answer="2">
+<legend>What does MPKA's state machine actually call for key agreement and derivation?</legend>
+<button type="button">Csm_JobKeyDerive via a configured CsmJob</button>
+<button type="button">RTE ports bound to CsmJobKeyExchangeCalcSecret</button>
+<button type="button">Direct key APIs with CsmKeyId arguments</button>
+<button type="button">CryIf channel dispatch by CryptoKeyId only</button>
+<div class="explain">Csm_KeyExchangeCalcPubVal/CalcSecret, Csm_KeyDerive, element set/copy and Csm_KeyCopy with key IDs — no keyx/KDF jobs. Jobs are only for SecOC MAC services.</div>
+</fieldset>
+</div>
+<script src="../assets/quiz.js"></script>
+
+<h2>Primary sources and continuation</h2>
+<ul>
+<li>Work order with every value: <a href="../reference/mpka-davinci-work-order.html">MPKA DaVinci work order — Csm · CryIf · Crypto</a></li>
+<li><a href="../component/vKeyM_MPKA/BSWMD/vKeyM_MPKA_bswmd.arxml">vKeyM_MPKA BSWMD</a> (the four refs → <code>/Csm/CsmKeys/CsmKey</code>) · <a href="../component/vKeyM_MPKA/Implementation/vKeyM_MPKA_CryptoStateMachine.c">CryptoStateMachine.c</a> (direct key-API call sites) · <a href="../security/include/config/Csm_Types.h">security Csm_Types.h</a> (element-ID contract)</li>
+<li><a href="../component/Crypto_30_CryWrapper/Implementation/Crypto_30_CryWrapper_Hw.c">Crypto_30_CryWrapper_Hw.c</a> (SecLib_Ecc ECDH/KDF leaf, size-driven encoding) · <a href="../component/CryIf/Implementation/CryIf.c">CryIf.c</a> (buffer-size trap)</li>
+<li>Builds on: <a href="0005-mpka-callback-replacement.html">Lesson 0005 — callback replacement</a> · <a href="0004-mpka-crypto-reference-chain.html">Lesson 0004 — reference chain</a></li>
+</ul>
+<div class="callout"><span class="title">Ask your teacher</span>Bring the licensed delivery's generated-types header (for the custom element IDs) and the EVCU-side shared-value-length choice, and we will fill the two open cells in the work-order tables before you touch the build PC.</div>
+<footer>Source-based configuration lesson. No DaVinci generation, GHS build or RH850 validation is claimed from this PC.</footer>
+</main>
+</body>
+</html>

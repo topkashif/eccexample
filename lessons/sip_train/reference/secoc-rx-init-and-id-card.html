@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SecOC Init and RX ID Debug Card</title><link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<div class="kicker">Reference card · first RX checks</div>
+<h1>SecOC RX blocked at init or PDU-ID check?</h1>
+<h2>Branch order in <code>SecOC_RxIndication</code></h2>
+<pre>1. !SecOC_IsInitialized()         → E_UNINIT (2)
+2. id >= generated RX table size  → E_INVALID_PDU_SDU_ID (3)
+3. invalid generated RX handle    → E_INVALID_PDU_SDU_ID (3)
+4. NULL pointer / metadata checks
+5. min/configured secured length</pre>
+<p>If check 1 is true, the current frame’s ID, pointer, length, MAC, and key have not been evaluated yet.</p>
+<h2>Init does not return success/failure</h2>
+<pre>SecOC_Init() returns void
+success path calls SecOC_SetInitialized(TRUE)
+SecOC_InitMemory() sets it FALSE
+SecOC_DeInit() sets it FALSE</pre>
+<p>Break at the successful setter and at later reset/deinit calls. A visible return from <code>SecOC_Init()</code> alone proves nothing about success.</p>
+<h2>Breakpoints</h2>
+<pre>SecOC_InitMemory
+SecOC_Init error branches
+SecOC_SetInitialized(TRUE)
+SecOC_DeInit
+SecOC_RxIndication line 224
+</pre>
+<h2>DET pairs</h2>
+<table><thead><tr><th>API ID</th><th>Error</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>0x01</code></td><td><code>7</code></td><td>Init failed; inspect init pointer/magic check.</td></tr>
+<tr><td><code>0x01</code></td><td><code>2</code></td><td>Init called while already initialized; inspect duplicate/partition init.</td></tr>
+<tr><td><code>0x42</code></td><td><code>2</code></td><td>RX call saw SecOC uninitialized.</td></tr>
+<tr><td><code>0x42</code></td><td><code>3</code></td><td>RX ID out of range or generated handle invalid.</td></tr>
+</tbody></table>
+<p><code>SECOC_DEV_ERROR_DETECT</code> checks conditions. <code>SECOC_DEV_ERROR_REPORT</code> controls DET reporting. They are distinct.</p>
+<h2>If init passes</h2>
+<pre>record: id
+record: SecOC_GetSizeOfRxSecuredPduInfo()
+check:  SecOC_IsInvalidHndOfRxSecuredPduInfo(id)</pre>
+<p>Do not assume the SecOC RX ID equals the CAN ID, COM ID, or Authentic-PDU handle. Compare generated CanIf→PduR routing with the generated SecOC RX table.</p>
+<div class="callout caution"><strong>Do not force TRUE or bypass the check.</strong> Find the failed transition or the ID/handle mismatch.</div>
+<p><a href="../lessons/0011-secoc-init-branch-and-rx-pdu-id.html">Lesson 11</a> · <a href="../research/secoc-rx-first-branch-debug.md">Detailed debugger note</a></p>
+</main></body></html>

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lesson 11 — Diagnose SecOC Init and RX ID Checks</title><link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<div class="kicker">Lesson 11 · first-branch debugging</div>
+<h1>Separate “SecOC was called” from “SecOC initialized successfully”</h1>
+<p class="lede">You reached <code>SecOC_RxIndication()</code> from CANoe. Now determine which gate stops it: module state, generated SecOC RX PDU ID, or the next parameter/length checks.</p>
+<div class="callout"><strong>First question:</strong> does <code>!SecOC_IsInitialized()</code> evaluate true, or does execution fall through to the <code>id</code> check? Those are different problems.</div>
+
+<h2>1. `SecOC_Init()` returning is not proof of successful initialization</h2>
+<p>The local Vector API returns <code>void</code>. In <code>SecOC.c</code>, the success path sets the internal initialized state only at line 205:</p>
+<pre>SecOC_SetDevModeEnabled(FALSE);
+SecOC_SetInitialized(TRUE);</pre>
+<p>Earlier, <code>SecOC_Init()</code> can set a nonzero local <code>errorId</code> for a repeated init, a null configured init pointer, or a final magic-number mismatch. It still reaches the function end; the caller receives no <code>E_OK</code>.</p>
+<div class="callout caution"><strong>Therefore:</strong> “I saw <code>SecOC_Init()</code> and it returned” does not prove the RX state is initialized. Break on the success assignment and inspect the error path/DET report.</div>
+
+<h2>2. Debug the init state transition</h2>
+<p>Set breakpoints in this order:</p>
+<ol>
+<li><code>SecOC_InitMemory()</code> — it sets initialized FALSE.</li>
+<li><code>SecOC_Init()</code> entry and its error branches.</li>
+<li>The success block at <code>SecOC.c:198–205</code>, especially <code>SecOC_SetInitialized(TRUE)</code>.</li>
+<li><code>SecOC_DeInit()</code> — it also sets initialized FALSE.</li>
+<li><code>SecOC_RxIndication()</code> at <code>SecOC_RxIf.c:224</code>.</li>
+</ol>
+<p>Inspect whether <code>SecOC_InitMemory()</code> or <code>SecOC_DeInit()</code> runs after the successful set. If the flag becomes TRUE and later is FALSE, find the intervening write/reset. If the debugger cannot watch the accessor, inspect its definition in the generated SecOC headers/configuration and set a watchpoint on its actual backing state.</p>
+
+<h2>3. Use DET to distinguish init errors</h2>
+<p><code>SecOC_Init()</code> keeps its error in a local variable and reports it through <code>SecOC_ReportDetError(SECOC_SID_INIT, errorId)</code>. DET reporting only happens when <code>SECOC_DEV_ERROR_REPORT</code> is enabled; that is separate from <code>SECOC_DEV_ERROR_DETECT</code>, which enables runtime parameter checks.</p>
+<table><thead><tr><th>Observed DET/API result</th><th>Meaning to investigate</th></tr></thead><tbody>
+<tr><td>API <code>0x01</code>, error <code>7</code></td><td>Initialization failed: check configured init pointer and final magic-number/configuration.</td></tr>
+<tr><td>API <code>0x01</code>, error <code>2</code></td><td>Init was called while the module already reported initialized; inspect duplicate/partition startup calls and call order.</td></tr>
+<tr><td>API <code>0x42</code>, error <code>2</code></td><td><code>SecOC_RxIndication</code> saw the module as uninitialized at runtime.</td></tr>
+</tbody></table>
+
+<h2>4. If initialization passes, then inspect the PDU ID</h2>
+<p>Only after the init condition is false does the function evaluate:</p>
+<pre>id >= SecOC_GetSizeOfRxSecuredPduInfo()</pre>
+<p>If true, <code>SECOC_E_INVALID_PDU_SDU_ID</code> is assigned. If it is false, the next generated-handle check can assign the same error at <code>SecOC_RxIf.c:238–240</code>.</p>
+<p>At the breakpoint, record:</p>
+<pre>id
+SecOC_GetSizeOfRxSecuredPduInfo()
+SecOC_IsInvalidHndOfRxSecuredPduInfo(id)</pre>
+<p><code>id</code> is used as the generated SecOC secured-RX-PDU handle/index here. Do not assume it is the CAN identifier, a COM signal ID, or the Authentic-PDU destination handle. Check the generated CanIf/PduR route and SecOC RX handle table together.</p>
+
+<h2>5. Only then move to pointer and length checks</h2>
+<p>After the ID and handle pass, the code checks null pointers, configured metadata, minimum length, and configured secured-PDU length. For HV_BATT the CANoe bus frame is 8 bytes, but compare against the values in the generated SecOC configuration at runtime.</p>
+<pre>error 1 → NULL pointer / required metadata pointer
+error 5 → invalid or too-short PDU length
+error 10 → runtime buffer busy (reported separately)</pre>
+
+<h2>Focused next run</h2>
+<ol>
+<li>At RX entry, capture whether the init branch is taken.</li>
+<li>If taken, inspect whether <code>SecOC_SetInitialized(TRUE)</code> was ever executed and whether a later reset/deinit occurs.</li>
+<li>If not taken, step to the ID comparison and record <code>id</code> and generated RX table size.</li>
+<li>Continue into the invalid-handle check; do not stop at the bounds check alone.</li>
+<li>Read the final <code>errorId</code> or the DET record, since <code>SecOC_RxIndication()</code> itself returns <code>void</code>.</li>
+</ol>
+<div class="callout caution"><strong>Do not</strong> force the initialized flag TRUE, remove the development check, or change the PDU ID before learning which branch is actually taken.</div>
+
+<h2>Primary sources</h2>
+<p><a href="https://www.autosar.org/fileadmin/standards/R23-11/CP/AUTOSAR_CP_SWS_SecureOnboardCommunication.pdf">AUTOSAR CP R23-11 SecOC SWS</a>, §8.3.1 (<code>SecOC_Init</code>) and §8.4.1 (<code>SecOC_RxIndication</code>); local <code>SecOC.c</code>, <code>SecOC_RxIf.c</code>, and <code>SecOC.h</code>. See also the <a href="../research/secoc-rx-first-branch-debug.md">first-branch debugger note</a>, <a href="../reference/secoc-rx-observability-card.html">RX observability card</a>, and <a href="0010-rx-secoc-observability-without-ack.html">Lesson 10</a>.</p>
+<div class="callout"><strong>Bring back these four observations:</strong> (1) did the init branch fire? (2) was the line setting initialized TRUE reached? (3) what are <code>id</code> and the generated RX table size? (4) what API/error pair appears in DET? Ask me to interpret those values before moving to CSM debugging.</div>
+</main></body></html>

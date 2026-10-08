@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ECDH → ICUSE Slot — Pipeline Fact Sheet</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+
+<p class="kicker">Reference · ICUSE Key Provisioning Course</p>
+<h1>ECDH → ICUSE Slot Pipeline</h1>
+<p><em>Compressed essence of <a href="../lessons/0003-ecdh-derived-key-to-slot.html">Lesson 0003</a>. Grounded in <code>docs/ecc_integration_notes.md</code>.</em></p>
+
+<!-- ============================================================ -->
+<h2>1 · The chain, end to end</h2>
+<pre><code>ICUS PRNG ──► d (28 B, ephemeral, software ECP)          Hw_KeyExchangeCalcPubVal  Hw.c:880
+              │
+              ├─► Z = X‖Y (56 B) ──► over CAN to peer
+              │
+peer Z_peer ─► K = d · Q_peer   (on-curve validated)      Hw_KeyExchangeCalcSecret  Hw.c:947
+              │
+              ▼  SHAREDVALUE element (56 B x‖y or 28 B x)
+msgGrpId ────► K_out = X9.63-KDF-SHA256(Z, SI=msgGrpId)  Hw_KeyDerive              Hw.c:1037
+              │        Si = SHA-256(Z ‖ ctrBE32 ‖ SI), trunc 16 B      (seclib_ecc.c:293)
+              ▼
+        16-byte AES-128 CMAC key
+              │
+     ┌────────┴──────────────────────────────┐
+     ▼ as delivered                          ▼ with KEY_5 requirement (new step)
+software KeyStorage                    SecLib_KeyDataType{KEY_5, KEY_5, UID_wild,
+  → Csm_KeyCopy → group key              1, KU, key16, 0} 
+  → Phase 2: RAM_KEY via                 → SecLib_KeySHEUpdate → CMD_LOAD_KEY
+    SecLib_KeyRAMUpdate                    (same machinery as Lesson 0001)
+  (volatile, zero persistent slots)      → CMAC gen+verify proof, decide WP first!</code></pre>
+
+<!-- ============================================================ -->
+<h2>2 · KEY_5 parameter set</h2>
+<table>
+  <tr><th>Field</th><th>Value</th><th>Anchor</th></tr>
+  <tr><td>Raw KEY_ID</td><td><code>0x08</code> (KEYMD = 0)</td><td>Cry_30_Rh850Icus_Types.h:75 · manual Table 4.1</td></tr>
+  <tr><td>keyId = authKeyId</td><td><code>KEY_5</code> (self-auth, empty slot ⇒ KEY_AuthID ≡ 0¹²⁸)</td><td>manual §4.4 p. 43 · secure_boot.c:439</td></tr>
+  <tr><td>Counter</td><td>1 first load; <strong>+1 on every renewal</strong> (monotonic, anti-replay)</td><td>manual §4.4</td></tr>
+  <tr><td>Flags</td><td><code>KU</code> (CMAC-only) — <strong>WP only if the key never rotates</strong></td><td>manual Table 4.2 · crypto_library_type.h:67–76</td></tr>
+  <tr><td>UID</td><td>wildcard (all-zero) while DWC = 0</td><td>crypto_library_type.h:60</td></tr>
+  <tr><td>Write path</td><td><code>SecLib_GenerateM1M2M3</code> + <code>SecLib_KeySHEUpdate</code> → <code>CMD_LOAD_KEY</code></td><td>key_manager.c:99 · crypto_library.c:456 · Hw.c:1100</td></tr>
+</table>
+
+<h2>3 · Mandatory integration checklist</h2>
+<ol>
+  <li><strong>Extend the SecLib slot whitelist:</strong> add <code>case KEY_5:</code> to <code>SecLib_MACGenerate</code> (crypto_library.c:238–246) and <code>SecLib_MACVerify</code> (crypto_library.c:319–327) — otherwise every CMAC on KEY_5 fails with "keyId not supported".</li>
+  <li><strong>Bridge CryWrapper → security lib:</strong> read the 16 derived bytes from the group-key element (or pass them directly) and fill <code>SecLib_KeyDataType</code>; wipe the software copy once <code>CMD_LOAD_KEY</code> succeeds.</li>
+  <li><strong>Respect the RAM_KEY ownership policy</strong> while K1/K2 derivation bounces through the RAM slot (key_manager.c:235, 287) — no concurrent RAM_KEY user during the load.</li>
+  <li><strong>Decide WP before first provisioning</strong> — one-way latch; rotating ECDH keys cannot live in a WP slot.</li>
+  <li><strong>Update the assurance workproduct:</strong> notes §6 boundary ("persistent slots never written by the ECC path") is deliberately broken by this requirement — record the change and the justification.</li>
+  <li><strong>Verify:</strong> CMAC generate + verify round-trip with the new slot (adapt secure_boot.c:463–480); then confirm SecOC frames authenticate.</li>
+</ol>
+
+<h2>4 · Assurance boundaries (from notes §7 — unchanged by KEY_5)</h2>
+<ul>
+  <li>ECC is <strong>software</strong> (mbedtls ECP 2.27.0 port + fork bignum); ICUSE has no ECC engine. "HPSE protection" claims must <strong>not</strong> be made for the negotiation path.</li>
+  <li>Entropy source: ICUS PRNG via <code>SecLib_RandomGenerate</code>; CS.00098 compliance to be confirmed by the security team.</li>
+  <li>Hardening present: on-curve peer point validation (invalid-curve rejection), unbiased scalars, coordinate blinding, zeroization on every exit path.</li>
+  <li>Ephemeral <code>d</code> lives in CPU RAM only, never in NVM or a persistent slot.</li>
+</ul>
+
+<h2>5 · Failure signals specific to this path</h2>
+<table>
+  <tr><th>Signal</th><th>Cause</th></tr>
+  <tr><td>"keyId not supported" (DLT 20019)</td><td>KEY_5 missing from the SecLib MAC switch — checklist item 1</td></tr>
+  <tr><td><code>E_VC_SECBOOT_ICUS_KEY_UPDATE_ERROR</code></td><td>M1M2M3 rejected: counter not greater than stored, CMAC mismatch, or UID/DWC violation</td></tr>
+  <tr><td><code>ERC_KEY_WRITE_PROTECTED</code> (ERR5)</td><td>Attempt to renew a WP-flagged KEY_5 — the WP trap</td></tr>
+  <tr><td><code>SecLib_EccIsInitialized()</code> false</td><td><code>SecLib_EccInit()</code> not called after <code>SecLib_Init()</code> (notes §2)</td></tr>
+  <tr><td>Self-test KAT failure</td><td>Run <code>SecLib_EccSelfTest()</code> on bench after init — all 12 KATs must pass (notes §5)</td></tr>
+</table>
+
+<footer>
+  Sources: docs/ecc_integration_notes.md · seclib_ecc.h/.c · Crypto_30_CryWrapper_Hw.c · crypto_library.c · key_manager.c · secure_boot.c · ICUSE manual §4.<br>
+  Course: <a href="../lessons/0001-icuse-key-slots.html">lesson 0001</a> · <a href="../lessons/0002-datastore-key-lifecycle.html">lesson 0002</a> · <a href="../lessons/0003-ecdh-derived-key-to-slot.html">lesson 0003</a> · <a href="key-slot-map.html">key slot map</a>
+</footer>
+</main>
+</body>
+</html>

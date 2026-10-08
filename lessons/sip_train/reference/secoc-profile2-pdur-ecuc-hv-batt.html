@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SecOC Profile 2 · PduR and ECUC map</title><link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<div class="kicker">Reference · AUTOSAR CP R23-11 · Vector MICROSAR</div>
+<h1>HV_BATT Profile 2: PduR and ECUC map</h1>
+<div class="callout"><strong>Wire contract:</strong> secured CAN PDU = 8 bytes; Authentic PDU = 5 bytes; MAC = 3 bytes; freshness = 0 bytes.</div>
+<h2>Physical and logical layout</h2>
+<pre>CAN byte 0..2  named payload signals
+CAN byte 3..4  reserved/padding, fixed 0x00, authenticated
+CAN byte 5..7  MAC_HV_BATT, 24-bit truncated CMAC
+
+CMAC input = SecOCDataId (2 bytes) || AuthenticPdu (5 bytes)
+</pre>
+<p>If your specification numbers bytes from 1, the same map is bytes 1..3, 4..5, and 6..8. Do not leave a byte unexplained.</p>
+<h2>SecOC containers</h2>
+<table><tr><th>Container / parameter</th><th>Value for HV_BATT</th></tr>
+<tr><td><code>SecOCRxPduProcessing</code></td><td>one RX processing entry; verification enabled</td></tr>
+<tr><td><code>SecOCRxSecuredPduLayer → SecOCRxSecuredPdu</code></td><td>received secured PDU, length 8</td></tr>
+<tr><td><code>SecOCRxSecuredLayerPduRef</code></td><td>global secured PDU used by CanIf</td></tr>
+<tr><td><code>SecOCSecuredRxPduVerification</code></td><td><strong>TRUE</strong></td></tr>
+<tr><td><code>SecOCRxAuthenticPduLayer → SecOCRxAuthenticPdu</code></td><td>post-verification PDU, length 5</td></tr>
+<tr><td><code>SecOCRxAuthenticLayerPduRef</code></td><td>global 5-byte Authentic PDU</td></tr>
+<tr><td><code>SecOCAuthInfoTruncLength</code></td><td><strong>24 bits</strong></td></tr>
+<tr><td><code>SecOCFreshnessValueLength</code></td><td><strong>0 bits</strong></td></tr>
+<tr><td><code>SecOCFreshnessValueTruncLength</code></td><td><strong>0 bits</strong></td></tr>
+<tr><td><code>SecOCUseAuthDataFreshness</code></td><td><strong>FALSE</strong></td></tr>
+<tr><td><code>SecOCAuthPduHeaderLength</code></td><td>0 bits/bytes according to tool units</td></tr>
+<tr><td><code>SecOCRxAuthServiceConfigRef</code></td><td>CSM MAC-verify job</td></tr>
+</table>
+<h2>PduR: exactly two RX IF paths</h2>
+<table><tr><th>Path</th><th><code>PduRSrcPduRef</code></th><th><code>PduRDestPduRef</code></th><th>Length</th></tr>
+<tr><td>A</td><td>CanIf global secured PDU</td><td>SecOC secured-PDU endpoint</td><td>8 → 8</td></tr>
+<tr><td>B</td><td>SecOC authentic-layer PDU</td><td>COM/upper authentic PDU</td><td>5 → 5</td></tr></table>
+<p>For both paths, use communication-interface routing. Use direct data provision for this fixed-length receive forwarding. Queueing, TP threshold, TriggerTransmit, gateway routing, and split processing are not part of this initial design. Set processing to immediate initially; choose deferred only if the project deliberately schedules it and validates the queue/main-function behavior.</p>
+<div class="callout caution"><strong>Security boundary:</strong> Path A must not route directly to COM. COM must receive only Path B after successful SecOC verification.</div>
+<h2>Generated-code proof</h2>
+<ol><li>CanIf callback enters PduR and ultimately calls <code>SecOC_RxIndication</code>.</li><li>SecOC calls <code>Csm_MacVerify</code> with Data ID plus the 5-byte Authentic PDU and the received 3-byte MAC.</li><li>After success, SecOC calls <code>PduR_SecOCRxIndication</code> with length 5.</li><li>Path B calls <code>Com_RxIndication</code> for the Authentic PDU.</li></ol>
+<h2>Do not edit calculated PduR fields</h2>
+<p>Let validation/generation calculate <code>PduRRoutingPathCommunicationType</code>, destination handle, direction, routing type, and related IDs. Change source/destination references, regenerate, then inspect the generated callback chain.</p>
+<h2>Sources</h2><ul>
+<li><a href="https://www.autosar.org/fileadmin/standards/R23-11/CP/AUTOSAR_CP_SWS_SecureOnboardCommunication.pdf">AUTOSAR SecOC R23-11</a>, Profile 2 and configuration requirements.</li>
+<li><a href="https://www.autosar.org/fileadmin/standards/R23-11/CP/AUTOSAR_CP_SWS_PDURouter.pdf">AUTOSAR PduR R23-11</a>, sections 10.2.6–10.2.9.</li>
+<li><a href="../research/autosar-r23-11-secoc-configuration-notes.md">Project configuration notes</a>.</li>
+</ul><p><strong>Ask follow-up questions</strong> with a DaVinci routing row or ECUC excerpt and it can be mapped field by field.</p>
+</main></body></html>

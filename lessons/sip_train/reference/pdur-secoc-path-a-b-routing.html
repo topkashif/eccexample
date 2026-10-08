@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PduR SecOC Path A/B routing card</title><link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<div class="kicker">Reference · PduR routing</div>
+<h1>SecOC RX: Path A and Path B</h1>
+<div class="callout"><strong>Rule:</strong> CanIf → SecOC carries the 8-byte secured PDU. SecOC → COM carries the verified 5-byte Authentic PDU.</div>
+<table><tr><th>Path</th><th>Source</th><th>Destination</th><th>Length</th><th>Generated callback</th></tr>
+<tr><td>A</td><td>CanIf Rx PDU</td><td>SecOC secured endpoint</td><td>8</td><td><code>SecOC_RxIndication</code></td></tr>
+<tr><td>B</td><td>SecOC Authentic PDU</td><td>COM / upper consumer</td><td>5</td><td><code>Com_RxIndication</code></td></tr></table>
+<h2>When Path A currently references COM</h2>
+<ol><li>Determine whether the route is genuinely CanIf → COM or only a global-PDU ownership display.</li><li>Inspect generated code: Path A must eventually call <code>SecOC_RxIndication</code>.</li><li>If it calls <code>Com_RxIndication</code>, remove/disable the direct route.</li><li>Set Path A destination to the SecOC secured-PDU endpoint.</li><li>Create Path B from the SecOC authentic-layer PDU to the COM Authentic PDU.</li><li>Regenerate; do not edit calculated handle IDs, direction, or routing type.</li></ol>
+<h2>SecOC references</h2>
+<pre>SecOCRxSecuredLayerPduRef  → global secured PDU, length 8
+SecOCRxAuthenticLayerPduRef → global Authentic PDU, length 5
+SecOCPduType               = SECOC_IFPDU</pre>
+<p><a href="../lessons/0005-pdur-path-a-and-b-routing.html">Read the detailed lesson</a>.</p>
+</main></body></html>

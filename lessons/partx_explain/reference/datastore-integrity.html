@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DATASTORE_KEY &amp; Data-at-Rest Integrity — Fact Sheet</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+
+<p class="kicker">Reference · ICUSE Key Provisioning Course</p>
+<h1>DATASTORE_KEY &amp; Data-at-Rest Integrity</h1>
+<p><em>Compressed essence of <a href="../lessons/0002-datastore-key-lifecycle.html">Lesson 0002</a>. Companion to the <a href="key-slot-map.html">Key Slot Map</a>.</em></p>
+
+<!-- ============================================================ -->
+<h2>1 · Identity card</h2>
+<table>
+  <tr><th>Attribute</th><th>Value</th><th>Anchor</th></tr>
+  <tr><td>Slot / raw KEY_ID</td><td><code>KEY_3</code> / <code>0x06</code></td><td>crypto_library_type.h:226 · Cry_30_Rh850Icus_Types.h:73</td></tr>
+  <tr><td>Origin of value</td><td>ICUSE TRNG, generated on-target, never injected or derived</td><td>secure_boot.c:433 → crypto_library.c:182</td></tr>
+  <tr><td>Registration</td><td>SHE M1|M2|M3 via CMD_LOAD_KEY, self-authenticated (AuthID = ID, empty slot ⇒ KEY_AuthID ≡ 0¹²⁸)</td><td>secure_boot.c:437–455 · manual §4.4 p. 43</td></tr>
+  <tr><td>Counter</td><td>1 (first registration, monotonic thereafter)</td><td>secure_boot.c:441</td></tr>
+  <tr><td>Flags</td><td><code>KU | WP</code> — CMAC-only + permanently frozen</td><td>secure_boot.c:442 · manual Table 4.2</td></tr>
+  <tr><td>Allowed operations</td><td><code>SecLib_MACGenerate</code> / <code>SecLib_MACVerify</code> only (CMAC-AES-128)</td><td>crypto_library.c:243, 324</td></tr>
+  <tr><td>Created when</td><td>Step 2 of <code>SecSB_EnableSecurity</code>, after secure boot enable</td><td>secure_boot.c:145</td></tr>
+</table>
+
+<h2>2 · Secure block layout (64 bytes)</h2>
+<pre><code> offset 0  ┌────────────────────────┐
+           │  CMAC (16 bytes)       │  AES-128-CMAC over bytes 16..63,
+           │                        │  computed with DATASTORE_KEY (KEY_3)
+ offset 16 ├────────────────────────┤
+           │  payload (48 bytes)    │  stored in PLAINTEXT — integrity only,
+           │                        │  no confidentiality
+ offset 64 └────────────────────────┘</code></pre>
+<p class="cite"><code>BLOCK_SIZE</code>=64 (crypto_library.h:49), <code>MAC_BYTE_SIZE</code>=16. Flows: data_protection.c:48 (verify), :120 (generate).</p>
+
+<h2>3 · Flows</h2>
+<table>
+  <tr><th>Path</th><th>Write</th><th>Read</th></tr>
+  <tr><td><code>hsto_WriteSecure</code> / <code>hsto_ReadSecure</code><br>(direct API, data_protection.c)</td>
+      <td>CMAC(payload) → header; write master block; on flash fail → backup at <code>target + BLOCK_SIZE</code></td>
+      <td>read master → verify CMAC; fail &amp; secure boot off → retry backup; fail &amp; secure boot on → <strong>zeroize + error</strong> (lines 79–86)</td></tr>
+  <tr><td>NvM callbacks (nvm_driver.c)</td>
+      <td><code>SecLib_NVM_MACVerify_Write</code> — CMAC embedded before NvM write (line 541)</td>
+      <td><code>SecLib_NVM_MACVerify_Read</code> PostReadTransformation — verify; fail ⇒ NvM reports <strong>INTEGRITY_FAILED</strong> (line 596)</td></tr>
+</table>
+<p>Protected NvM blocks: <code>SAM</code> (MAC ‖ data), <code>Dataset</code> (security log, two CMACs), <code>ODOM_01–10</code> (CLI variant). One key seals them all.</p>
+
+<h2>4 · The two cryptographic formulas</h2>
+<h3>Seal / verify (every day use)</h3>
+<pre><code>CMAC = AES-128-CMAC( DATASTORE_KEY, payload[0..47] )   → stored in block[0..15]</code></pre>
+<h3>Registration transport (once, at provisioning)</h3>
+<pre><code>K1 = KDF(KEY_AuthID, KEY_UPDATE_ENC_C)      K2 = KDF(KEY_AuthID, KEY_UPDATE_MAC_C)
+M2 = ENC_CBC,K1,IV=0 ( Counter(28) | KEY_FLAG(6) | "0…"94 | KEY(128) )
+M3 = CMAC_K2 ( M1 | M2 )
+
+SHE KDF(K, C):   OUT_1 = ENC_ECB(OUT_0, K) ⊕ K ⊕ OUT_0        (OUT_0 = 0¹²⁸)
+                 out   = ENC_ECB(OUT_1, C) ⊕ C ⊕ OUT_1
+
+KEY_UPDATE_ENC_C = 01015348 45008000 00000000 000000B0h
+KEY_UPDATE_MAC_C = 01025348 45008000 00000000 000000B0h</code></pre>
+<p class="cite">Implemented in key_manager.c:329 (<code>SecLib_CalculateKdfSHE</code> — runs on ICUSE by bouncing derived keys through the RAM_KEY slot), :182 (<code>SecLib_GenerateM2</code>), :273 (<code>SecLib_GenerateM3</code>). Matches HIS SHE spec / manual §4.4.</p>
+
+<h2>5 · M2 byte map (what the unwrapping sees)</h2>
+<table>
+  <tr><th>Byte</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5–15</th><th>16–31</th></tr>
+  <tr><td>Content</td><td colspan="4">counter&lt;&lt;4 | flags[7:4] (BE) → <code>00 00 00 19</code> for counter=1, KU|WP (0x10|0x09)</td><td>flags[3:0]&lt;&lt;4</td><td>00…00</td><td>new key (TRNG)</td></tr>
+</table>
+<p class="cite">key_manager.c:206–230. After CBC encryption with K1, IV=0. ICUSE inverts this inside the secure unit.</p>
+
+<h2>6 · Security ledger</h2>
+<table>
+  <tr><th>Property</th><th>Status</th><th>Note</th></tr>
+  <tr><td>Integrity</td><td>✅</td><td>bit flips anywhere ⇒ verify fails ⇒ zeroize / INTEGRITY_FAILED</td></tr>
+  <tr><td>Authenticity</td><td>✅</td><td>forgery needs the slot key; it can't leave ICUSE, is CMAC-only (KU), frozen (WP)</td></tr>
+  <tr><td>Confidentiality</td><td>❌</td><td>payload plaintext by design; pair with an encryption key if needed</td></tr>
+  <tr><td>Freshness</td><td>❌</td><td>whole-block replay of older valid copies is undetected; odometer blocks address rollback at the application layer</td></tr>
+</table>
+
+<h2>7 · Variant &amp; debugging notes</h2>
+<ul>
+  <li><code>KEYRAM_AS_KEY</code>: DATASTORE_KEY ≡ RAM_KEY (volatile). data_protection.c:7 hard-codes a dev-only key (<code>pKeyRam[]</code>) reloaded on every read/write — <strong>never for production</strong>; the default build's TRNG + WP flow is the secure one.</li>
+  <li>Slot empty at verify time ⇒ ICUS <code>ERC_KEY_EMPTY</code> (0x008) → <code>E_VC_SECBOOT_ICUS_KEY_EMPTY</code>.</li>
+  <li>Re-provision attempt after WP ⇒ <code>ERC_KEY_WRITE_PROTECTED</code> (ERR5) — enable path treats this as "already enabled" (secure_boot.c:142).</li>
+  <li>M1M2M3 rejected (CMAC/counter/UID) ⇒ <code>ERC_KEY_UPDATE_ERROR</code> (ERR6).</li>
+</ul>
+
+<footer>
+  Sources: RH850/F1KM ICUSE User Manual R01UH0703EJ0100 Rev.1.00 §4.3–4.4 · HIS SHE Functional Specification v1.1 (see RESOURCES.md) · project <code>security/</code> sources (anchors in tables).<br>
+  Course: <a href="../lessons/0001-icuse-key-slots.html">lesson 0001</a> · <a href="../lessons/0002-datastore-key-lifecycle.html">lesson 0002</a> · <a href="key-slot-map.html">key slot map</a>
+</footer>
+</main>
+</body>
+</html>

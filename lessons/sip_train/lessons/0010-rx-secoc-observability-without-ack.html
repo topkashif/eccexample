@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lesson 10 — Verify RX SecOC Without a Bus Acknowledgement</title><link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<div class="kicker">Lesson 10 · RX observability</div>
+<h1>Prove SecOC verification without looking for an ACK</h1>
+<p class="lede">Your ECU is an RX-only node. The correct evidence is the ECU receive pipeline and the verified Authentic-PDU handoff—not an application acknowledgement on CAN.</p>
+<p class="small">For this frame, the received MAC is in physical bytes <code>CAN[5..7]</code>; the authenticated data is bytes <code>CAN[0..4]</code>, including the two zero padding bytes.</p>
+<div class="callout"><strong>Key distinction:</strong> a CAN ACK only means a CAN controller recognized the frame at the bus level. It does not mean that SecOC accepted the MAC, that CSM verified CMAC, or that COM received the signal.</div>
+
+<h2>1. Observe three evidence planes</h2>
+<table><thead><tr><th>Plane</th><th>Observe</th><th>What it proves</th></tr></thead><tbody>
+<tr><td>Bus</td><td>CANoe Trace: CAN ID, DLC 8, bytes 0–7</td><td>What CANoe actually transmitted</td></tr>
+<tr><td>ECU runtime</td><td>SecOC/PduR/CSM callbacks and result path</td><td>Whether the ECU processed and verified it</td></tr>
+<tr><td>Configuration</td><td>Generated IDs, lengths, Data ID, CSM job, PduR routes</td><td>Whether the ECU is wired for the intended contract</td></tr>
+</tbody></table>
+
+<h2>2. First breakpoint: SecOC entry</h2>
+<p>Set a breakpoint or tracepoint in:</p>
+<pre>SecOC_RxIndication()
+components/SecOC/Implementation/SecOC_RxIf.c:218</pre>
+<p>For the HV_BATT frame, inspect:</p>
+<pre>id
+info->SduLength       == 8
+info->SduDataPtr[0..7]</pre>
+<p>The local implementation rejects an uninitialized module, invalid PDU ID, null data pointer, and too-short/mismatched configured length in the checks around lines 224–264.</p>
+<div class="callout caution"><strong>If this breakpoint is never hit:</strong> stop debugging SecOC. Check CAN channel/filtering, CanIf RX PDU mapping, PduR Path A, and the generated secured-PDU handle first. If it is hit but takes the uninitialized branch, seeing <code>SecOC_Init()</code> return is not enough: that API is void. Prove its success path reached <code>SecOC_SetInitialized(TRUE)</code>, then check whether <code>SecOC_InitMemory()</code> or <code>SecOC_DeInit()</code> cleared it later. See <a href="0011-secoc-init-branch-and-rx-pdu-id.html">Lesson 11</a>.</div>
+
+<h2>3. Confirm the secured frame entered the RX state machine</h2>
+<p>Next inspect:</p>
+<pre>SecOC_RxIf_RxIndication()
+components/SecOC/Implementation/SecOC_RxIf.c:310</pre>
+<p>For a normal non-split PDU, the local source calls:</p>
+<pre>SecOC_RxIf_NormalPduIndication()    // copies the secured frame
+SecOC_Verify_CopyAuthenticatorToCache() // caches bytes 5..7
+SecOC_RxIf_SetReadyToVerifyStates() // resets attempts and sets state</pre>
+<p>The relevant normal-PDU branch is around lines 327–333. Verify that the generated configuration identifies this as a normal IF PDU, not a split or TP PDU.</p>
+
+<h2>4. Deferred versus immediate processing</h2>
+<p>Your initial configuration uses deferred processing. The source selects immediate processing only when the generated PDU configuration says so:</p>
+<pre>SecOC_RxIf_SetReadyToVerifyStates()
+components/SecOC/Implementation/SecOC_RxIf.c:130–143</pre>
+<p>For deferred processing, verify that the generated scheduler calls the configured RX main function. The Vector implementation enters:</p>
+<pre>SecOC_MainFunctionRxInternal()
+  → SecOC_RxProcessing_HandlePdus()
+  → SecOC_Verify_MAC()</pre>
+<p>These are in <code>SecOC_RxProcessing.c</code> around lines 294, 314, and 339. AUTOSAR requires <code>SecOC_MainFunctionRx</code> to process pending RX verification and, after successful verification, pass the Authentic PDU upward.</p>
+
+<h2>5. The decisive crypto breakpoint</h2>
+<p>Set a breakpoint at:</p>
+<pre>SecOC_VerifyProcessing_MACUsingCSM43()
+components/SecOC/Implementation/SecOC_VerifyProcessing.c:700</pre>
+<p>Immediately before the CSM call, inspect:</p>
+<pre>SecOC_GetAuthenticationLayerIdOfRxPduInfo(rxPduInfoIdx)
+verifyDataPtr
+ dataLength
+received authenticator buffer
+SecOC_GettruncatedAuthenticationLengthOfRxPduInfo(rxPduInfoIdx)
+</pre>
+<p>The actual call is around lines 729–736:</p>
+<pre>Csm_MacVerify(
+  authenticationLayerId,
+  CRYPTO_OPERATIONMODE_SINGLECALL,
+  verifyDataPtr,
+  dataLength,
+  receivedMacPtr,
+  truncatedAuthenticationLength,
+  verifyResultPtr);</pre>
+<p>For this project, the expected logical data is:</p>
+<pre>02 02 || CAN[0] || CAN[1] || CAN[2] || 00 || 00</pre>
+<p>Expected data length:</p>
+<pre>7 bytes = 2-byte Data ID + 5-byte Authentic PDU</pre>
+<p>Expected MAC length:</p>
+<pre>24 bits</pre>
+<div class="callout caution"><strong>Important:</strong> CSM’s <code>macLength</code> parameter is in bits. The local CSM header documents this explicitly, and SecOC passes the generated truncated-authentication length directly.</div>
+
+<h2>6. Synchronous and asynchronous crypto paths</h2>
+<p>If CSM/Cry is synchronous, the CSM call may return the verification result immediately and SecOC continues in the same processing path.</p>
+<p>If it is asynchronous, the state changes to a callback-wait state and the crypto completion must return through:</p>
+<pre>SecOC_RxCsmCallback(
+  PduIdType rxHandleId,
+  Csm_ResultType result)
+
+components/SecOC/Implementation/SecOC_RxProcessing.c:236</pre>
+<p>The callback checks the waiting state, stops timeout supervision, and may call <code>SecOC_Verify_MAC()</code> immediately if configured. Otherwise, the next RX main-function invocation processes the result.</p>
+<p>For the local RH850 CRY implementation, the CMAC verify main function calls:</p>
+<pre>Csm_MacVerifyCallbackNotification(retVal)
+Csm_MacVerifyServiceFinishNotification()</pre>
+<p>in the asynchronous state-machine path. If the CSM callback never reaches SecOC, inspect the generated CSM job callback ID, CSM/Cry processing mode, Cry main-function scheduling, and <code>SecOC_RxCsmCallback</code> linkage.</p>
+
+<h2>7. Success evidence: the five-byte Authentic PDU is forwarded</h2>
+<p>On a successful CSM result, the local source calls:</p>
+<pre>SecOC_VerifyProcessing_ProcessSuccessfulVerificationResult()
+components/SecOC/Implementation/SecOC_VerifyProcessing.c:571</pre>
+<p>It prepares a <code>PduInfoType</code> from the configured Authentic-PDU buffer and length, then calls:</p>
+<pre>SecOC_RxProcessing_ForwardPduToUpperLayer()
+components/SecOC/Implementation/SecOC_RxProcessing.c:364</pre>
+<p>For an IF PDU, the decisive handoff is:</p>
+<pre>PduR_SecOCRxIndication(
+  authenticExternalId,
+  pduInfoPtr);</pre>
+<p>The local implementation calls it around <code>SecOC_RxProcessing.c:369–371</code>. For HV_BATT, inspect that:</p>
+<pre>pduInfoPtr->SduLength == 5
+pduInfoPtr->SduDataPtr[0..4] == Authentic PDU
+</pre>
+<p>At the generated Path B destination, often <code>Com_RxIndication()</code>, confirm that COM receives the five-byte verified Authentic PDU—not the eight-byte secured frame and not the three-byte MAC.</p>
+
+<h2>8. Failure evidence</h2>
+<p>For a bad payload, bad padding byte, or bad MAC, the expected path is:</p>
+<pre>Csm_MacVerify() called
+verification result != OK
+SecOC_VerifyProcessing_ProcessUnsuccessfulVerificationResult()
+no normal PduR_SecOCRxIndication() to COM</pre>
+<p>The failure handler is in <code>SecOC_VerifyProcessing.c:229</code>. It increments verification attempts, optionally propagates a failure status, retries if configured, and eventually sets the RX PDU to an aborted state.</p>
+<p>For this first test, keep these bypass mechanisms disabled:</p>
+<pre>SecOCEnableDevelopmentMode       = FALSE
+SecOCIgnoreVerificationResult    = FALSE
+verification override             = CANCEL
+status propagation                = NONE is acceptable</pre>
+<p>Status propagation being <code>NONE</code> does not disable verification. It only means no application status callback is expected.</p>
+
+<h2>9. Minimal target instrumentation</h2>
+<p>If debugger tracing is inconvenient, add temporary non-secret counters:</p>
+<pre>rx_enter_count
+rx_buffered_count
+mac_verify_request_count
+csm_callback_ok_count
+csm_callback_fail_count
+secoc_verify_success_count
+secoc_verify_failure_count
+authentic_forward_count</pre>
+<p>Also record only metadata:</p>
+<pre>last secured length = 8
+last authentic length = 5
+last Data ID = 0x0202
+last MAC length = 24 bits
+last generated CSM job ID = [project value]</pre>
+<p>Never log the AES key.</p>
+
+<h2>Primary sources</h2>
+<p><a href="https://www.autosar.org/fileadmin/standards/R23-11/CP/AUTOSAR_CP_SWS_SecureOnboardCommunication.pdf">AUTOSAR CP R23-11 SecOC SWS</a>, sections 8.4.1 and 8.6.1; local <code>SecOC_RxIf.c</code>, <code>SecOC_RxProcessing.c</code>, <code>SecOC_Verify.c</code>, and <code>SecOC_VerifyProcessing.c</code>; local CSM/Cry implementation and <a href="../research/secoc-rx-observability-checklist.md">RX observability checklist</a>.</p>
+<div class="callout"><strong>Retrieval prompt:</strong> For a valid frame, name the first function proving SecOC received it, the function proving CSM was requested, and the function proving the verified five-byte Authentic PDU was forwarded upward.</div>
+</main></body></html>

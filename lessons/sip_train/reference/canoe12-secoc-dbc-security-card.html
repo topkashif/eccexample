@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CANoe 12 SecOC DBC and Security Card</title><link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<div class="kicker">Reference card · CANoe 12 / SecOC</div>
+<h1>DBC frame versus Security Manager contract</h1>
+<h2>Physical DBC frame</h2>
+<pre>DLC = 8, Classical CAN
+CAN[0]     payload signal
+CAN[1..2]  payload signal
+CAN[3..4]  zero padding
+CAN[5..7]  24-bit MAC</pre>
+<h2>Security Manager object</h2>
+<table><thead><tr><th>Property</th><th>Value</th></tr></thead><tbody>
+<tr><td>Profile</td><td>Profile 2 / 24Bit-CMAC-No-FV</td></tr>
+<tr><td>Algorithm</td><td>AES-128 CMAC</td></tr>
+<tr><td>Data ID</td><td><code>0x0202</code></td></tr>
+<tr><td>Secured PDU</td><td>8 bytes</td></tr>
+<tr><td>Authentic area</td><td>offset 0, length 5</td></tr>
+<tr><td>Authenticator</td><td>offset 5, length 3 bytes</td></tr>
+<tr><td>Freshness</td><td>0 transmitted/full bytes for this project</td></tr>
+</tbody></table>
+<h2>CMAC input</h2>
+<pre>02 02 || CAN[0] || CAN[1] || CAN[2] || 00 || 00</pre>
+<h2>CANoe setup order</h2>
+<ol><li>Add DBC and verify DLC 8.</li><li>Display bytes 0–7 in Trace.</li><li>Open Security Configuration/Security Manager.</li><li>Add SecOC protected-PDU object.</li><li>Map it to the secured database message/controller port.</li><li>Configure Data ID, profile, offsets, lengths, and test key.</li><li>Generate valid traffic and compare bytes.</li></ol>
+<h2>Negative tests</h2>
+<pre>change byte 0..2, keep MAC → reject
+change byte 3..4, keep MAC → reject
+change byte 5..7             → reject
+replay valid frame           → may accept: no FV</pre>
+<div class="callout caution"><strong>CANoe 12 caveat:</strong> exact labels, profile-file format, DBC-versus-ARXML import behavior, CAPL APIs, and OEM add-on requirements are version/license dependent. Verify against the installed CANoe 12 Help.</div>
+<p><a href="../research/canoe12-secoc-security-manager.md">Detailed research and evidence notes</a> · <a href="../lessons/0009-canoe-dbc-secoc-security-manager.html">Lesson 9</a></p>
+</main></body></html>

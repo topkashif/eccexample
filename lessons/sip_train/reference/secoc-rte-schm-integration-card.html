@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SecOC RTE and SchM Integration Card</title><link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<div class="kicker">Reference card · SecOC integration</div>
+<h1>SecOC without a generated RTE: symbol map</h1>
+<p class="lede">Use this card to classify errors after moving MICROSAR SecOC source into an existing project.</p>
+<h2>Required generated boundaries</h2>
+<table><thead><tr><th>Artifact</th><th>Role</th><th>Do not replace with</th></tr></thead><tbody>
+<tr><td><code>SecOC_Lcfg.h/.c</code></td><td>Generated configuration accessors, tables, types, and state data.</td><td>Hand-written <code>SecOC_Get...</code> macros.</td></tr>
+<tr><td><code>SecOC_PBcfg.c</code></td><td>Post-build configuration, if selected.</td><td>Arbitrary zero-initialized config.</td></tr>
+<tr><td><code>SecOC_Cfg_RxData.h</code></td><td>Generated RX feature/configuration symbols.</td><td>Deleting feature branches from vendor source.</td></tr>
+<tr><td><code>SchM_SecOC.h</code></td><td>Exclusive-area synchronization macros.</td><td>Undeclared functions or unconditional empty macros.</td></tr>
+<tr><td><code>Rte_SecOC_Type.h</code></td><td>RTE-visible SecOC implementation types.</td><td>Only the one missing enum, if other RTE interfaces remain enabled.</td></tr>
+</tbody></table>
+<h2>R23-11 verification result values</h2>
+<pre>SECOC_VERIFICATIONSUCCESS              0x00u
+SECOC_VERIFICATIONFAILURE              0x01u
+SECOC_FRESHNESSFAILURE                 0x02u
+SECOC_AUTHENTICATIONBUILDFAILURE       0x03u
+SECOC_NO_VERIFICATION                  0x04u
+SECOC_VERIFICATIONFAILURE_OVERWRITTEN  0x05u</pre>
+<h2>R23-11 status structure</h2>
+<pre>typedef struct
+{
+  uint16 freshnessValueID;
+  SecOC_VerificationResultType verificationStatus;
+  uint16 secOCDataId;
+} SecOC_VerificationStatusType;</pre>
+<p class="small">Match the generated package's memory-class and compiler macros. The field names and semantics are normative; the snippet is not a replacement for the release-matched generated header.</p>
+<h2>SchM macros used by this source</h2>
+<pre>SchM_Enter_SecOC_SECOC_EXCLUSIVE_AREA_RXSTATE()
+SchM_Exit_SecOC_SECOC_EXCLUSIVE_AREA_RXSTATE()
+SchM_Enter_SecOC_SECOC_EXCLUSIVE_AREA_TXSTATE()
+SchM_Exit_SecOC_SECOC_EXCLUSIVE_AREA_TXSTATE()</pre>
+<h2>RTE status callback distinction</h2>
+<pre>SecOC_VerificationStatusType
+  = data structure passed to the notification
+
+SecOCRteVerificationStatusType
+  = Vector-generated function-pointer typedef
+
+semantic callback:
+Std_ReturnType callback(
+  const SecOC_VerificationStatusType *status);</pre>
+<h2>HV_BATT first-test recommendation</h2>
+<ul><li>RX only; do not compile TX-only functionality out by deleting source.</li><li>Use a complete generated SecOC configuration.</li><li>Set verification-status propagation to <code>NONE</code> if the application does not need it.</li><li>Use <code>SecOCQueryFreshness = CFUNC</code> only when that is the project’s real configured mode; no fabricated freshness RTE port.</li><li>Keep <code>SecOCSecuredRxPduVerification = TRUE</code>.</li><li>Verify: CanIf/PduR → <code>SecOC_RxIndication</code> → <code>Csm_MacVerify</code> → verified Authentic PDU → PduR/COM.</li></ul>
+<div class="callout caution"><strong>Release matching:</strong> the local SecOC source reports MICROSAR 19.02.06. Generated SecOC, SchM, RTE, PduR, CSM, and Cry artifacts must match the installed package and configuration variant.</div>
+</main></body></html>

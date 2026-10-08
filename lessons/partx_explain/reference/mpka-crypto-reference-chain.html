@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MPKA Crypto Configuration — Reference Chain</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+<p class="kicker">Reference · RH850F1K / ICUSE · vKeyM_MPKA · local Vector package</p>
+<h1>MPKA ECDH: Crypto–CryIf–CSM container map</h1>
+<p><em>Detailed reference to accompany <a href="../lessons/0004-mpka-crypto-reference-chain.html">Lesson 0004</a>. It maps the BSWMD/configuration contract; it is not an ECUC export or an instruction to link Vector runtime sources. For the project-owned callback/facade architecture see <a href="mpka-callback-replacement-map.html">the replacement map</a> and <a href="../lessons/0005-mpka-callback-replacement.html">Lesson 0005</a>.</em></p>
+
+<div class="callout warn"><span class="title">First decide which Crypto provider is in this build</span>
+The local, current <code>Crypto_30_CryWrapper_Hw.c</code> implements ECDH and X9.63/SHA-256 by calling <code>SecLib_Ecc*</code>; that is CPU software math/KDF, not ICUSE ECDH. The mbedTLS/SecurityLib integration notes say the selected RNG bridge reaches the ICUS RNG. Keep those claims separate: “ICUSE performs cryptography” may be true for the RNG and other SHE AES operations, but it does not mean ICUSE calculates this ECDH. If the delivery/branch differs from these files, inspect the target build’s leaf implementation again.
+</div>
+
+<h2>1 · What this MPKA code actually dispatches</h2>
+<p>For this workspace, the MPKA state machine calls direct CSM <strong>key-management APIs</strong>, keyed by configured <code>CsmKeyId</code>s:</p>
+<table>
+<tr><th>MPKA operation</th><th>Source path</th><th>What to configure</th></tr>
+<tr><td>Generate a public value</td><td><code>Csm_KeyExchangeCalcPubVal(keyId,...)</code>; MPKA expects curve-sized output.</td><td>Group CSM key → CryIfKey → CryptoKey with exchange element layout; provider must implement the operation.</td></tr>
+<tr><td>Compute peer/shared value</td><td><code>Csm_KeyExchangeCalcSecret(keyId, peer, len)</code>.</td><td>Same group CSM/CryIf/Crypto key; provider reads the stored ephemeral private scalar and writes shared-value element.</td></tr>
+<tr><td>Derive a SecOC message key</td><td><code>Csm_KeyDerive(kdfInputKeyId, tmpKeyId)</code>; source is in <code>vKeyM_MPKA_DeriveMessageGroupKey</code>.</td><td>KDF-input CSM key and temporary-target CSM key each map to Crypto keys on the provider path; Crypto source and target must be driver-compatible.</td></tr>
+<tr><td>Copy, clear, validate</td><td><code>Csm_KeyElementSet/Copy</code>, <code>Csm_KeyCopy</code>, <code>Csm_KeySetValid</code>.</td><td>Access rights, matching element IDs/lengths, and CSM <code>CSM_KEY</code> support are required.</td></tr>
+</table>
+<p><strong>Important correction to generic container advice:</strong> MPKA is not calling <code>Csm_JobKeyDerive</code> or the CsmJob key-exchange APIs. The CSM runtime implementation gates these direct key APIs on <code>CSM_KEY == STD_ON</code> and forwards mapped CSM key IDs through CryIf. Configure the <code>CsmKeys/CsmKey</code> references as essential. Create CsmJobs/CsmPrimitives/CsmQueues only for other job-ID callers in this application (such as SecOC MAC verification, or a separate job-based random-generation client), not as substitute references for the MPKA key-ID calls.
+</p>
+<div class="path">
+<div class="stage"><span class="who">vKeyM_MPKA CDD reference</span><code>CddKeyNegotiationGroupKeyRef</code> and message-group CSM references</div>
+<div class="arrow">↓</div>
+<div class="stage"><span class="who">CSM direct key API</span><code>CsmKeyId → CsmKeyRef → CryIfKey</code></div>
+<div class="arrow">↓</div>
+<div class="stage"><span class="who">CryIf key mapping</span><code>CryIfKeyId → CryIfKeyRef → CryptoKey</code></div>
+<div class="arrow">↓</div>
+<div class="stage hw"><span class="who">Crypto key representation and implementation</span><code>CryptoKey → CryptoKeyType → CryptoKeyElement</code>; active provider code executes ECDH/KDF</div>
+</div>
+
+<h2>2 · Step 0: freeze this IPC use case before opening DaVinci</h2>
+<ul>
+<li>Negotiation group ID: <strong>2</strong>; IPC local member ID <strong>3</strong>; EVCU remote member ID <strong>4</strong>; two present members select runtime ECDH (per established project context).</li>
+<li>Curve: the workspace software extension currently implements P-224/secp224r1; ensure <code>CddKeyNegotiationCurve</code> is secp224 and matches EVCU. BSWMD defaults are not proof of the active project setting.</li>
+<li>Use case: SecOC key derivation, not MACsec. Do not create the MACsec-only second temporary key unless another configured group needs MACsec.</li>
+<li>Keep CDD negotiation-group ID, local/remote member IDs, message-group ID, CSM key IDs, CryIf key/channel IDs, Crypto key/driver-object IDs, and SecOC Data ID separate. Assign project IDs in the appropriate component; no numeric value in a BSWMD is a project allocation.</li>
+<li>Do not commit a 28-vs-56-byte shared value by intuition alone. The local MPKA BSWMD distinguishes x-only (28 B P-224) from X||Y (56 B) by <code>CddKeyNegotiationSharedValueLengthType</code>, and ties supported output to CS.00172 revision/use case. For this SecOC path, cross-check the approved CS.00172 revision and the implementation’s KDF vector/peer contract. Configure shared-value element and PASSWORD to the selected same length; both ECUs must use the same choice.</li>
+</ul>
+
+<h2>3 · CSM: configure key objects first</h2>
+<p>Configuration path from local CSM BSWMD: <code>/AUTOSAR/EcucDefs/Csm/CsmKeys/CsmKey</code>. Each <code>CsmKey</code> has a unique <code>CsmKeyId</code>, <code>CsmKeyUsePort</code>, and required <code>CsmKeyRef</code> to a <code>CryIfKey</code>.</p>
+<table>
+<tr><th>Symbolic MPKA reference</th><th>CSM key role</th><th>Workspace requirement/step</th></tr>
+<tr><td><code>CddKeyNegotiationGroupKeyRef</code></td><td><code>KEX_GROUP_2</code> (illustrative name only)</td><td>One dedicated CSM key for negotiation group 2; do not reuse for another group; component BSWMD requires persistence. Key type/template must include the MPKA/provider-required ECBD-compatible and ECDH elements.</td></tr>
+<tr><td><code>CddMsgGrpKDFInputKey</code></td><td><code>KDF_INPUT_2</code></td><td>Source key for <code>Csm_KeyDerive</code>. PASSWORD capacity equals chosen shared-value length (P-224 28 or 56 B). SALT has at least 1 B for SecOC (source writes one message-group ID byte). It need not be persisted and may be shared across message groups only if concurrency/access policy permits.</td></tr>
+<tr><td><code>CddMsgGrpTmpKey</code></td><td><code>MAC_TMP_2</code></td><td>Target of X9.63/SHA-256 KDF; key element ID 1 is exactly 16 B per MPKA BSWMD; persistent; unique to one message group; compatible type with the final key for whole-key copy.</td></tr>
+<tr><td><code>CddMsgGrpKey</code></td><td><code>MAC_FINAL_2</code></td><td>Committed key, copied from temporary key after group success; same type; persistent; unique to message group; element ID 1 at least 16 B (16 B is the aligned AES-128 design).</td></tr>
+</table>
+<ol>
+<li>Create each <code>CsmKey</code> and assign a unique, project-owned <code>CsmKeyId</code>. Do not derive the numeric ID from the group/member ID.</li>
+<li>For each, set <code>CsmKeyUsePort = FALSE</code> unless an RTE key interface is actually required. MPKA calls BSW CSM APIs directly, not key client/server ports.</li>
+<li>Set <code>CsmKeyRef</code> to the corresponding CryIf key. CSM BSWMD explicitly says that its <code>CsmKeyRef</code> maps to <code>CryIfKey</code>, which then maps to a Crypto driver key.</li>
+<li>Enable and retain <code>CSM_KEY</code> runtime support in the configured release. If the feature is off, the inspected key-management implementation returns <code>E_NOT_OK</code>.</li>
+<li>Review CSM key-element set/copy/get and key-valid API availability/access against the installed version, generated header, and security policy. Do not make ephemeral private/shared-secret elements plaintext-readable just because the API exists.</li>
+</ol>
+
+<h2>4 · Crypto key elements: create typed layouts, not secrets</h2>
+<p>The local CryptoWrapper BSWMD path is <code>/MICROSAR/Crypto_30_CryWrapper/Crypto</code>. Create element definitions, key-type layouts, then CryptoKey instances. All element sizes below are <strong>bytes</strong>.</p>
+<table>
+<tr><th>Logical key layout</th><th>Element IDs/roles</th><th>P-224 size/policy for this CDD/provider</th></tr>
+<tr><td>MPKA group-exchange key</td><td>Standard exchange elements plus Vector custom workflow elements referenced by the MPKA TR/source.</td><td><code>OWNPUBKEY</code> 56; <code>PRIVKEY</code> 28; custom left/right partner public values 56 each; custom intermediate 56; <code>SHAREDVALUE</code> equals the explicitly selected shared-value length (28 or 56); <code>KEYEXCHANGE_ALGORITHM</code>, custom local-position, and custom member-count scalar fields 1 each. All MPKA/provider-written fields must accept the writes; do not infer symbol-to-element-ID values from prose.</td></tr>
+<tr><td>KDF input</td><td><code>KEYDERIVATION_PASSWORD</code>, <code>KEYDERIVATION_SALT</code></td><td>PASSWORD capacity equals configured shared value. SALT capacity ≥1 B. If a larger capacity is used than bytes written, enable partial access for that element; CryWrapper set/copy logic checks written length vs capacity.</td></tr>
+<tr><td>Temporary SecOC key</td><td>element ID 1, MAC key type</td><td>16 B; persisted; not reused across message groups.</td></tr>
+<tr><td>Final SecOC key</td><td>element ID 1, same key type as temporary</td><td>16 B is clean AES-128 match; persistent and unique per group as BSWMD specifies.</td></tr>
+</table>
+<p>For each <code>CryptoKeyElement</code>, configure <code>CryptoKeyElementId</code>, maximum <code>CryptoKeyElementSize</code>, <code>CryptoKeyElementAllowPartialAccess</code>, <code>CryptoKeyElementPersist</code>, <code>CryptoKeyElementReadAccess</code>, and <code>CryptoKeyElementWriteAccess</code>. Also review any driver-specific initial-value/virtual-target settings; never put ephemeral private keys or shared secrets in a static initial value. For a software-backed key-element implementation, confidential material remains software key-storage/RAM unless separately protected.</p>
+<h3>4a · Access rights derived from observed call paths</h3>
+<ul>
+<li>External MPKA <code>Csm_KeyElementSet</code> calls need write access for the exact elements they set: algorithm selector; custom ECU position/count; both custom partner-public elements; overwrite/clear of shared value and private key; and derivation PASSWORD/SALT/clearing.</li>
+<li>The wrapper’s private scalar is generated internally by the provider into the <code>PRIVKEY</code> Crypto element in <code>CalcPubVal</code>; MPKA later clears it. Do not seed it with a fixed value. The provider’s internal <code>KeyElementSetInternal</code> path is separate from external Csm write access, but keep policy consistent with the callout/clear APIs.</li>
+<li>The wrapper reads its private scalar, PASSWORD, and SALT internally using a local Crypto-driver API; those internal reads do not imply public <code>Csm_KeyElementGet</code> must be enabled for those elements.</li>
+<li><code>Csm_KeyElementCopy</code> of the shared value to KDF PASSWORD and <code>Csm_KeyCopy</code> of the temporary key to the final key are same-driver internal copies in the inspected CryWrapper implementation. Avoid cross-driver mapping for the input/target keys unless the release’s cross-driver bridge, access policy, buffer capacity, and provider explicitly support it.</li>
+<li>For the adapter in <code>security/source/crypto_lib/secoc_securitylib_csm_wrapper.c</code>, reading <code>CddMsgGrpKey</code> element 1 into a CPU buffer needs CSM/Crypto element read access; this is a compatibility adapter and CPU exposure. If you do not want that, keep it non-readable and bind the real SecOC CSM job directly to the final CSM key instead.</li>
+</ul>
+
+<h2>5 · CryIf: route keys and (only when relevant) jobs</h2>
+<h3>Direct MPKA key-management operations</h3>
+<ol>
+<li>Under <code>CryIfKeys/CryIfKey</code>, create one key mapping for each CSM key, with a unique <code>CryIfKeyId</code> and required <code>CryIfKeyRef</code> to its Crypto driver <code>CryptoKey</code>.</li>
+<li>Verify the CSM mapping chain is exactly <code>CsmKeyRef → CryIfKey → CryIfKeyRef → CryptoKey</code>. IDs are separate mapped domains; same numeric IDs are not required and should not be assumed.</li>
+<li>Add the referenced Crypto module under <code>CryIfCryptoModules/CryIfCryptoModule</code> and set <code>CryIfCryptoModuleRef</code> to the selected Crypto module configuration. This associates the module’s function table; it is distinct from the channel/key references.</li>
+</ol>
+<h3>Crypto channel only if a CSM job is configured</h3>
+<p>Direct <code>Csm_KeyExchangeCalc*</code>/<code>Csm_KeyDerive</code> key-ID APIs do not take a CSM job ID and do not dispatch through a CsmQueue/CryIfChannel. If you also configure a job-based API (e.g. a downstream SecOC MAC verify job or explicit random-generation job), add <code>CryIfChannels/CryIfChannel</code> with a unique <code>CryIfChannelId</code> and <code>CryIfDriverObjectRef → CryptoDriverObject</code>; reference that channel via the applicable <code>CsmQueue/CsmChannelRef</code>. Do not manufacture a queue merely to satisfy the direct MPKA key API. For mixed key storage across Crypto drivers, CryIf element/key copies may use a CPU buffer bridge, whereas CryIf key derivation dispatches to the source key’s driver and does not automatically bridge source/target drivers.</p>
+
+<h2>6 · Crypto: key types, keys, driver object, provider</h2>
+<ol>
+<li><strong>CryptoKeyElements:</strong> define each unique element ID and size/access/persist policy described above. The wrapper’s underlying implementation enforces exact length unless partial access is enabled; this directly affects PASSWORD, SALT, clearing writes, and temporary/final key copy.</li>
+<li><strong>CryptoKeyTypes:</strong> create type layouts: a negotiation key compatible with the Vector <code>KeyExchange_NISTP224R1_BD</code> workflow, a KDF-input layout with PASSWORD/SALT, and a one-element 16-byte MAC-key layout used by temporary and final keys. Reference every required element definition in the key type.</li>
+<li><strong>CryptoKeys:</strong> instantiate distinct CryptoKeys with unique CryptoKeyId, key-type reference, NVM binding/persistence according to the package and system design. Each CSM key’s CryIf mapping points to one of these.</li>
+<li><strong>CryptoDriverObjects:</strong> create/use the Crypto driver object that owns the selected CryWrapper implementation. The CryIf Crypto channel, where job clients need one, points to it. This driver object BSWMD says no underlying driver queue is supported in this CryWrapper delivery; the queue field is only an async buffer with a 1-entry restriction. Do not use that as a recommendation to queue synchronous direct MPKA key APIs.</li>
+<li><strong>CryptoPrimitive and provider support:</strong> configure a CSM <code>CsmPrimitive</code> / Crypto <code>CryptoPrimitive</code> tuple for key-exchange/KDF only if the configured API path consumes it. In the inspected direct key API path, operations dispatch by key to CryIf/Crypto function pointers rather than a configured CsmJob tuple. A symbolic AUTOSAR algorithm enum is not a provider implementation. At the provider layer confirm actual ECDH CalcPubVal, CalcSecret, X9.63-SHA256 derive, random source/ICUS call, correct P-224 encoding, feature macros, initialization, and matching generated code. This workspace’s wrapper functions are the actual software ECC implementation to trace; the top-level source note states the three former E_NOT_OK stubs were filled. Verify active branch/build PC includes it.</li>
+</ol>
+
+<h2>7 · Detailed work order in DaVinci</h2>
+<ol>
+<li><strong>Freeze release/provider scope.</strong> Record Vector CSM/CryIf/CryWrapper/ICUS versions, project AUTOSAR version, exact RH850 derivative/security option, CS.00172 revision, active config variant, and the Crypto provider selected by the build. BSWMD definitions are not the active ECUC values.</li>
+<li><strong>Make a key inventory.</strong> For group 2 list <code>KEX_GROUP_2</code>; for its SecOC message group record <code>KDF_INPUT_2</code>, <code>MAC_TMP_2</code>, and <code>MAC_FINAL_2</code>. Those are illustrative container names only. Put each actual MPKA-generated key symbolic reference beside its CsmKey container and driver element type.</li>
+<li><strong>Build key references bottom-up.</strong> Create Crypto element definitions → CryptoKeyTypes → CryptoKeys, map each with CryIfKey → CryptoKey, then set each CsmKey’s CsmKeyRef → CryIfKey. Finally set the MPKA CDD key references → those CsmKeys. Keep different ID domains distinct.</li>
+<li><strong>Populate exact layouts.</strong> Use the 28/56/1/16-byte relationship table, but resolve shared-value length from project protocol revision and peer agreement. Check every MPKA set/copy/clear length against each destination element’s size/partial-access setting.</li>
+<li><strong>Access and lifecycle.</strong> Set key-valid after each key population as the MPKA source does; ensure write permission for its key-element operations; provision NvM only where key persistence is required. Decide whether the final key is non-readable (prefer direct CSM jobs) or CPU-readable (only if the SecOcSecurityLib adapter is used and accepted).</li>
+<li><strong>Add Crypto provider capabilities.</strong> Trace Crypto public key operation functions through to the actual selected leaf. On this project’s software ECC path, confirm P-224/ECDH/KDF works and that the initialized RNG bridge calls ICUSE. Do not use generic ICUS AES/RNG features as evidence of hardware ECC.</li>
+<li><strong>Only add job containers for job callers.</strong> For CsmJob-based MAC verify/RNG: configure job ID, primitive ref + nested primitive service algorithm config, key ref, queue ref, sync/async/callback policy, queue channel ref, CryIf channel → driver object, and matching CryptoDriverObject primitive capability. For SecOC, job key should reference <code>CddMsgGrpKey</code> (final key) once generated configuration is integrated.</li>
+<li><strong>Generate and audit on the IPC build PC.</strong> Review DaVinci consistency checks and generated CSM/CryIf/Crypto/MPKA tables. This current PC cannot run the configured GHS compiler or DaVinci validation; nothing in this lesson represents a successful generation/build/target test.</li>
+<li><strong>Bench test on target.</strong> On two ECUs compare public-value contract and generated 16-byte derived-key equality using a protected test procedure; verify temporary-key copy, validity, cleanup, persistence/reboot behavior, and the SecOC job key binding. Do not log secret bytes.</li>
+</ol>
+
+<h2>8 · Short audit checklist</h2>
+<table>
+<tr><th>Gate</th><th>Pass evidence</th><th>Do not accept as proof</th></tr>
+<tr><td>API shape</td><td>MPKA code calls key-ID CSM APIs; key refs resolve to active CSM keys.</td><td>A generic CsmJob diagram, JobId, or BSWMD enum.</td></tr>
+<tr><td>Key mappings</td><td>Every CsmKeyRef resolves to a CryIfKey, then CryIfKeyRef to intended CryptoKey.</td><td>Equal CsmKeyId/CryIfKeyId/CryptoKeyId numbers.</td></tr>
+<tr><td>CryptoKeyTypes</td><td>All required element IDs, capacities, partial flags, accesses, persistence, and copies fit actual API sizes.</td><td>A pretty element name, template, or default size.</td></tr>
+<tr><td>Provider</td><td>Active compile-selected leaf implements both ECDH operations plus X9.63-SHA256; build and target evidence later.</td><td>ICUSE availability, CSM API declaration, generic Crypto enum.</td></tr>
+<tr><td>Final SecOC key</td><td>SecOC’s CSM MAC job uses the committed <code>CddMsgGrpKey</code> (or explicit accepted ICUS RAM_KEY adapter).</td><td>Using the group key or temporary key, or assuming persistence means an ICUS secure slot.</td></tr>
+</table>
+
+<h2>Short recall</h2>
+<p>Answer from memory, then select an option for immediate feedback.</p>
+<div class="quiz" id="mpka-reference-quiz" data-interactive>
+  <fieldset data-answer="1">
+    <legend>MPKA calls Csm_KeyExchangeCalcSecret(keyId, ...). What does keyId identify?</legend>
+    <button type="button">A configured CSM job</button>
+    <button type="button">A configured CSM key</button>
+    <button type="button">A configured CryIf key</button>
+    <button type="button">A configured Crypto key</button>
+    <div class="explain">The direct MPKA API takes a CSM key ID. CSM maps that key through CsmKeyRef to CryIfKey, then CryIfKeyRef to the Crypto driver key. It is not a job or channel ID.</div>
+  </fieldset>
+  <fieldset data-answer="2">
+    <legend>What must hold for CryIf direct KeyDerive?</legend>
+    <button type="button">A CsmJob is always required</button>
+    <button type="button">Queue maps directly to CryIfChannel</button>
+    <button type="button">Same selected crypto function table</button>
+    <button type="button">Same CsmKeyId and CryptoKeyId values</button>
+    <div class="explain">CryIf dispatches KeyDerive through the source key's driver function table, passing both mapped CryptoKey IDs. Keep source and target on the same selected Crypto module/provider.</div>
+  </fieldset>
+  <fieldset data-answer="0">
+    <legend>For a SecOC CSM_MAC_VERIFY job, which MPKA key belongs on its key reference?</legend>
+    <button type="button">Reference final key from job</button>
+    <button type="button">Use group key from negotiation</button>
+    <button type="button">Point job at temporary key</button>
+    <button type="button">Use the local member identifier</button>
+    <div class="explain">After MPKA commits successfully, CddMsgGrpKey is the final message-group key. A SecOC CSM MAC job must reference that key, not the exchange key or temporary key.</div>
+  </fieldset>
+</div>
+<script src="../assets/quiz.js"></script>
+
+<h2>Sources and continuation</h2>
+<ul>
+<li>Primary vendor source: <a href="../component/vKeyM_MPKA/Documentation/TechnicalReference_vKeyM_MPKA.pdf">vKeyM_MPKA Technical Reference v4.02.00</a>, §§5.4–5.7 (group Crypto key template, element sizes, KDF input, message key references).</li>
+<li>Normative: <a href="../docs/AUTOSAR_SWS_CryptoServiceManager.pdf">AUTOSAR SWS CryptoServiceManager</a>, <a href="../docs/AUTOSAR_SWS_CryptoInterface.pdf">CryptoInterface</a>, and <a href="../docs/AUTOSAR_SWS_CryptoDriver.pdf">Crypto Driver</a>. Check the exact installed release before translating parameter names.</li>
+<li>Local behavior: <code>component/vKeyM_MPKA/Implementation/vKeyM_MPKA_CryptoStateMachine.c</code>, MPKA/CSM/CryIf/Crypto BSWMDs, <code>component/Crypto_30_CryWrapper/Implementation/Crypto_30_CryWrapper_Hw.c</code>, and <code>docs/ecc_integration_notes.md</code>.</li>
+<li><a href="../lessons/0004-mpka-crypto-reference-chain.html">Lesson 0004</a> · <a href="../lessons/0003-ecdh-derived-key-to-slot.html">Lesson 0003: the software ECC versus ICUSE-slot boundary</a> · <a href="ecdh-key-load.html">ECDH key-load reference</a>.</li>
+</ul>
+<div class="callout"><span class="title">Ask your teacher</span>Bring your generated MPKA key references or active ECUC export to replace illustrative names with the project’s actual symbolic paths, and we can trace each one through CSM → CryIf → Crypto together.</div>
+<footer><a href="../MISSION.md">Mission</a> · Workspace-specific configuration map; no compilation, DaVinci generation, or target execution is claimed.</footer>
+</main>
+</body>
+</html>

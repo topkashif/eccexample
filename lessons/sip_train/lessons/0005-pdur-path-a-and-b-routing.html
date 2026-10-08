@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Lesson 5 — PduR Path A and Path B for SecOC RX</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <div class="kicker">Lesson 05 · PduR routing diagnosis</div>
+  <h1>Make PduR route the right PDU to the right module</h1>
+  <p class="lede">The key routing rule is simple: the secured 8-byte PDU goes into SecOC; only the verified 5-byte Authentic PDU goes to COM.</p>
+
+  <div class="callout">
+    <strong>Immediate diagnosis.</strong> If Path A currently has a <code>PduRDestPdu</code> referencing COM, it is not the SecOC receive path. It is a direct CanIf → COM route. For this RX-only secured message, replace that destination with the SecOC secured-PDU endpoint, then create a separate Path B whose destination is COM.
+  </div>
+
+  <h2>1. The two paths, side by side</h2>
+  <table>
+    <tr><th></th><th>Path A</th><th>Path B</th></tr>
+    <tr><td>Purpose</td><td>Deliver the received secured frame to SecOC</td><td>Deliver verified Authentic data to COM/consumer</td></tr>
+    <tr><td>Source module</td><td>CanIf</td><td>SecOC</td></tr>
+    <tr><td>Source data</td><td>8-byte secured PDU</td><td>5-byte Authentic PDU</td></tr>
+    <tr><td>Destination module</td><td>SecOC</td><td>COM or another upper consumer</td></tr>
+    <tr><td>Authentication state</td><td>Not yet verified</td><td>Verification succeeded</td></tr>
+    <tr><td>Generated callback shape</td><td><code>PduR_CanIfRxIndication</code> → <code>SecOC_RxIndication</code></td><td><code>PduR_SecOCRxIndication</code> → <code>Com_RxIndication</code></td></tr>
+  </table>
+
+  <h2>2. Path A — CanIf to SecOC</h2>
+  <pre>CAN controller
+  → CanIf Rx PDU: HV_BATT_SecuredPdu, length 8
+  → PduR source PDU
+  → PduR destination PDU: HV_BATT_SecuredPdu, endpoint SecOC
+  → SecOC_RxIndication()
+  → SecOC extracts Authentic[5] and MAC[3]</pre>
+
+  <h3>What to configure</h3>
+  <ol>
+    <li>In CanIf, configure the received global PDU with Classical CAN length 8 and upper-layer indication <code>PDUR</code>.</li>
+    <li>In SecOC, configure <code>SecOCRxSecuredPduLayer → SecOCRxSecuredPdu</code>.</li>
+    <li>Set <code>SecOCRxSecuredLayerPduRef</code> to the same global 8-byte secured PDU used by CanIf.</li>
+    <li>Set <code>SecOCSecuredRxPduVerification = TRUE</code>.</li>
+    <li>In PduR, create a communication-interface routing path with the CanIf PDU as <code>PduRSrcPduRef</code>.</li>
+    <li>Configure its <code>PduRDestPduRef</code> to the secured-PDU destination associated with SecOC—not the COM PDU.</li>
+    <li>Use direct IF data provision and no queue for the initial fixed-length test.</li>
+  </ol>
+
+  <div class="callout caution">
+    <strong>Do not route Path A to COM.</strong> COM would receive the MAC-bearing 8-byte secured frame before SecOC has authenticated it. That bypasses the security boundary and can also create a length mismatch if COM expects the 5-byte Authentic PDU.
+  </div>
+
+  <h2>3. Resolving the current COM destination in Path A</h2>
+  <p>There are two common DaVinci situations. Identify which one you have.</p>
+  <div class="card">
+    <h3>Case 1 — The route is genuinely CanIf → COM</h3>
+    <p>In the PduR routing-path view, the source is the CanIf Rx PDU and the destination module is COM. This is a normal unprotected communication route.</p>
+    <p><strong>Resolution:</strong></p>
+    <ol>
+      <li>Remove or disable that direct route for the secured HV_BATT PDU.</li>
+      <li>Keep the global 8-byte secured PDU for CanIf and SecOC.</li>
+      <li>Create the SecOC RX secured-PDU configuration and reference that same global PDU.</li>
+      <li>Create Path A with source CanIf and destination SecOC.</li>
+      <li>Create Path B separately with source SecOC and destination COM.</li>
+    </ol>
+  </div>
+  <div class="card">
+    <h3>Case 2 — The GUI shows COM because the global PDU is COM-owned</h3>
+    <p>Some Vector views show the owner or communication description of the global PDU rather than the actual PduR endpoint. In that case, the displayed COM association alone is not enough to diagnose the route.</p>
+    <p><strong>Resolution:</strong> inspect the actual routing endpoint and generated code. The decisive test is whether the generated CanIf receive route calls <code>SecOC_RxIndication</code> or <code>Com_RxIndication</code>. For a correct Path A it must call SecOC. If it calls COM, configure the route's destination endpoint as SecOC or let the SecOC/PduR integration wizard regenerate the route from the SecOC references.</p>
+  </div>
+
+  <h3>Do not edit calculated parameters</h3>
+  <p>In the local Vector PduR BSWMD, parameters such as <code>PduRDestPduHandleId</code>, <code>PduRDestPduDirection</code>, <code>PduRDestPduRoutingType</code>, and <code>PduRRoutingPathCommunicationType</code> are calculated by validation/generation. Change the source/destination PDU references and module endpoint; then regenerate. Do not hand-edit generated IDs or calculated direction/type values.</p>
+
+  <h2>4. Path B — SecOC to COM, in detail</h2>
+  <pre>SecOC verification succeeds
+  → SecOC builds PduInfoType for Authentic PDU
+      SduDataPtr = Authentic[0..4]
+      SduLength  = 5
+  → PduR_SecOCRxIndication(authentic external handle, &PduInfo)
+  → PduR source PDU lookup
+  → PduR destination PDU
+  → Com_RxIndication(COM PDU handle, &PduInfo)
+  → COM signal unpacking / upper consumer</pre>
+
+  <h3>Path B configuration</h3>
+  <ol>
+    <li>In SecOC, configure <code>SecOCRxAuthenticPduLayer</code>.</li>
+    <li>Set <code>SecOCRxAuthenticLayerPduRef</code> to a global 5-byte Authentic PDU.</li>
+    <li>Ensure the SecOC PDU type is an IF PDU: <code>SecOCPduType = SECOC_IFPDU</code>.</li>
+    <li>Configure the authentic PDU ID generated/assigned by SecOC. Do not choose a numeric handle by guesswork.</li>
+    <li>In PduR, use the SecOC authentic PDU as <code>PduRSrcPduRef</code>.</li>
+    <li>Use the COM-facing Authentic PDU as <code>PduRDestPduRef</code>.</li>
+    <li>Configure the destination's data provision as direct. The PduR Technical Reference states that direct provision copies the PDU while calling the destination transmit/indication function; TriggerTransmit is not needed for this receive forwarding path.</li>
+    <li>Do not put the 3-byte MAC in the COM PDU. COM receives only the 5-byte Authentic PDU.</li>
+  </ol>
+
+  <h3>What COM should see</h3>
+  <p>COM's receiving I-PDU must describe the authenticated data, not the physical secured frame. Its length must match the Authentic PDU, normally 5 bytes for this contract. The two padding bytes remain part of that PDU; COM may model them as reserved/unused bits or a padding field, but SecOC must have authenticated them before COM sees the data.</p>
+  <p>COM should not be responsible for:</p>
+  <ul>
+    <li>extracting the MAC;</li>
+    <li>checking the 24-bit authenticator;</li>
+    <li>constructing the Data ID;</li>
+    <li>deciding whether the frame is authentic.</li>
+  </ul>
+
+  <h2>5. The most important generated-code proof</h2>
+  <table>
+    <tr><th>Call site</th><th>Expected destination</th><th>Failure meaning</th></tr>
+    <tr><td>CanIf callback into PduR</td><td>PduR route eventually calls <code>SecOC_RxIndication</code></td><td>Path A is missing or still points to COM.</td></tr>
+    <tr><td>SecOC verification call</td><td><code>Csm_MacVerify</code> with DataToAuthenticator and received MAC</td><td>SecOC job/service reference or generated configuration is wrong.</td></tr>
+    <tr><td>Successful SecOC result</td><td><code>PduR_SecOCRxIndication</code> with 5-byte PDU</td><td>SecOC authentic-layer PDU or PduR Path B is missing.</td></tr>
+    <tr><td>PduR Path B destination</td><td><code>Com_RxIndication</code> for the COM Authentic PDU</td><td>COM-facing destination PDU or route is wrong.</td></tr>
+  </table>
+
+  <p>The local Vector source confirms this separation: the RX processing code calls <code>PduR_SecOCRxIndication</code> only when the PDU is an IF PDU after successful verification, and the verification-success function passes the Authentic PDU buffer and length upward. The AUTOSAR PduR model then maps that SecOC source PDU to the COM destination PDU.</p>
+
+  <h2>6. Minimal route model for your project</h2>
+  <pre>Global PDU: HV_BATT_SecuredPdu, length 8
+  CanIfRxPduRef ───────────────┐
+  SecOCRxSecuredLayerPduRef ───┼── same secured global PDU
+  PduR Path A source ───────────┘
+  PduR Path A destination ─────── SecOC secured endpoint
+
+Global PDU: HV_BATT_AuthenticPdu, length 5
+  SecOCRxAuthenticLayerPduRef ──┐
+  PduR Path B source ────────────┼── same authentic global PDU
+  PduR Path B destination ──────┘── COM endpoint</pre>
+
+  <div class="callout">
+    <strong>Practical next action.</strong> In DaVinci, inspect Path A and write down: source module, source global PDU, destination module, destination global PDU, and generated destination handle. If the destination module is COM and the generated callback is <code>Com_RxIndication</code>, reconfigure it as described above. If the GUI still displays COM but generated code calls SecOC, the display is showing PDU ownership rather than the effective endpoint.
+  </div>
+
+  <h2>Sources</h2>
+  <ul>
+    <li><a href="https://www.autosar.org/fileadmin/standards/R23-11/CP/AUTOSAR_CP_SWS_PDURouter.pdf">AUTOSAR PDU Router R23-11</a>, section 10.2.6–10.2.9.</li>
+    <li><a href="https://www.autosar.org/fileadmin/standards/R23-11/CP/AUTOSAR_CP_SWS_SecureOnboardCommunication.pdf">AUTOSAR SecOC R23-11</a>, section 10.1.10 and receive processing requirements.</li>
+    <li><a href="../components/PduR/Documentation/TechnicalReference_PduR.pdf">Local MICROSAR PduR Technical Reference</a>, communication-interface routing and direct data provision.</li>
+    <li><a href="../components/SecOC/Implementation/SecOC_RxProcessing.c">Local SecOC RX implementation</a>, forwarding after successful verification.</li>
+    <li><a href="../components/SecOC/BSWMD/SecOC_bswmd.arxml">Local SecOC BSWMD</a>, secured and Authentic PDU references.</li>
+  </ul>
+
+  <div class="callout"><strong>Ask follow-up questions.</strong> If you provide the Path A row or a small ECUC ARXML excerpt, I can map each field to the exact source/destination reference and tell you whether the current route is direct CanIf → COM or a display-only COM association.</div>
+</main>
+</body>
+</html>
